@@ -133,7 +133,8 @@ class TrajectorySimulator:
             )
             self.ground_truth.append(pt)
 
-    def generate_sensor_events(self, enable_gps_outage=True, outage_start=15.0, outage_end=25.0) -> List[SensorEvent]:
+    def generate_sensor_events(self, enable_gps_outage=True, outage_start=15.0, outage_end=25.0,
+                               enable_gps_spoofing=False, spoofing_start=15.0) -> List[SensorEvent]:
         """
         Generates realistic asynchronous measurement streams for all 8 sensors.
         Returns a time-sorted list of SensorEvent instances.
@@ -294,10 +295,19 @@ class TrajectorySimulator:
             in_outage = enable_gps_outage and (outage_start <= t <= outage_end)
             if not in_outage:
                 pt = self._interpolate_gt(t)
+                
+                # GPS Spoofing Injection (gradual drift)
+                spoof_offset = np.zeros(3)
+                if enable_gps_spoofing and t > spoofing_start:
+                    dt_spoof = t - spoofing_start
+                    # Accelerating drift: 0.5 m/s^2 pull to the left/off-course
+                    spoof_offset[0] = 0.5 * dt_spoof**2 * np.cos(pt.psi + np.pi/2)
+                    spoof_offset[1] = 0.5 * dt_spoof**2 * np.sin(pt.psi + np.pi/2)
+                    
                 z = np.array([
-                    pt.p[0] + sigma['gnss_pos'] * self.rng.randn(),
-                    pt.p[1] + sigma['gnss_pos'] * self.rng.randn(),
-                    pt.p[2] + sigma['gnss_alt'] * self.rng.randn(),
+                    pt.p[0] + spoof_offset[0] + sigma['gnss_pos'] * self.rng.randn(),
+                    pt.p[1] + spoof_offset[1] + sigma['gnss_pos'] * self.rng.randn(),
+                    pt.p[2] + spoof_offset[2] + sigma['gnss_alt'] * self.rng.randn(),
                     pt.v[0] + sigma['gnss_vel'] * self.rng.randn(),
                     pt.v[1] + sigma['gnss_vel'] * self.rng.randn(),
                     pt.v[2] + sigma['gnss_vel'] * self.rng.randn()

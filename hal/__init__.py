@@ -21,6 +21,7 @@ from .hardware_bus import (
 )
 from .sensor_interface import (
     SensorInterface,
+    SensorReading,
     GPSReceiver,
     IMUDriver,
     WheelEncoderDriver,
@@ -32,6 +33,6 @@ from .sensor_interface import (
 __all__ = [
     'HardwareBus', 'CANBusAdapter', 'UARTAdapter', 'SPIAdapter',
     'ROS2Adapter', 'SimulatedBus',
-    'SensorInterface', 'GPSReceiver', 'IMUDriver', 'WheelEncoderDriver',
+    'SensorInterface', 'SensorReading', 'GPSReceiver', 'IMUDriver', 'WheelEncoderDriver',
     'LiDARDriver', 'CameraDriver', 'UltrasonicDriver'
 ]

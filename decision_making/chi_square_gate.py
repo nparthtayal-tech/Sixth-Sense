@@ -149,9 +149,9 @@ class ChiSquareGate:
         # Compute NIS = y^T S^{-1} y
         try:
             SI = np.linalg.inv(S)
-            nis = float(np.dot(y.T, np.dot(SI, y)))
         except np.linalg.LinAlgError:
-            nis = float(np.sum(y ** 2))
+            SI = np.linalg.pinv(S)
+        nis = float(np.dot(y.T, np.dot(SI, y)))
 
         threshold = self._chi2_threshold(dim_m)
 

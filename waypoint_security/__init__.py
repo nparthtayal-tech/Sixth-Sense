@@ -9,12 +9,12 @@ Three layers of cross-validation before any destination change is accepted:
 3. environment_matcher — Physical landmark consensus from onboard sensors
 """
 
-from .geofence_validator import GeofenceValidator, GeofenceSignal, GeofenceVerdict
-from .command_validator import CommandValidator, CommandSignal, CommandVerdict
-from .environment_matcher import EnvironmentMatcher, EnvironmentSignal, EnvironmentVerdict
+from .geofence_validator import GeofenceValidator, GeofenceSignal, GeofenceVerdict, GeofenceZone
+from .command_validator import CommandValidator, CommandSignal, CommandVerdict, WaypointCommand
+from .environment_matcher import EnvironmentMatcher, EnvironmentSignal, EnvironmentVerdict, ExpectedLandmark, DetectedFeature
 
 __all__ = [
-    'GeofenceValidator', 'GeofenceSignal', 'GeofenceVerdict',
-    'CommandValidator', 'CommandSignal', 'CommandVerdict',
-    'EnvironmentMatcher', 'EnvironmentSignal', 'EnvironmentVerdict'
+    'GeofenceValidator', 'GeofenceSignal', 'GeofenceVerdict', 'GeofenceZone',
+    'CommandValidator', 'CommandSignal', 'CommandVerdict', 'WaypointCommand',
+    'EnvironmentMatcher', 'EnvironmentSignal', 'EnvironmentVerdict', 'ExpectedLandmark', 'DetectedFeature'
 ]

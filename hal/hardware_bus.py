@@ -180,8 +180,11 @@ class CANBusAdapter(HardwareBus):
                     )
                     self._bus.send(frame)
                 msg.acknowledged = True
-            except Exception as e:
+            except can.CanError as e:
                 logger.error(f"CAN TX error: {e}")
+                return False
+            except Exception as e:
+                logger.error(f"CAN TX unexpected error: {e}")
                 return False
         
         self._message_log.append(msg)
@@ -284,7 +287,12 @@ class UARTAdapter(HardwareBus):
                 self._serial.write(frame)
                 msg.acknowledged = True
             except Exception as e:
-                logger.error(f"UART TX error: {e}")
+                # Catch specific serial exceptions if possible
+                import serial
+                if isinstance(e, serial.SerialException):
+                    logger.error(f"UART TX error: {e}")
+                else:
+                    logger.error(f"UART TX unexpected error: {e}")
                 return False
         
         self._message_log.append(msg)
@@ -365,8 +373,11 @@ class SPIAdapter(HardwareBus):
             try:
                 self._spi.xfer2(list(data))
                 msg.acknowledged = True
+            except OSError as e:
+                logger.error(f"SPI TX error (OSError): {e}")
+                return False
             except Exception as e:
-                logger.error(f"SPI TX error: {e}")
+                logger.error(f"SPI TX unexpected error: {e}")
                 return False
         
         self._message_log.append(msg)
@@ -460,7 +471,11 @@ class ROS2Adapter(HardwareBus):
                 self._publishers[channel].publish(ros_msg)
                 msg.acknowledged = True
             except Exception as e:
-                logger.error(f"ROS2 publish error: {e}")
+                import rclpy
+                if isinstance(e, rclpy.exceptions.ROSInterruptException):
+                    logger.error(f"ROS2 publish interrupt: {e}")
+                else:
+                    logger.error(f"ROS2 publish unexpected error: {e}")
                 return False
         
         self._message_log.append(msg)

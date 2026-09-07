@@ -142,7 +142,7 @@ class DeadReckoningNavigator:
         self._accumulated_drift_estimate = 0.0
         self._time_in_dr = 0.0
     
-    def update(self, dt, omega_z=0.0, v_fwd=None, vz=0.0):
+    def update(self, dt, omega_z=0.0, v_fwd=None, vz=0.0, pitch=0.0, roll=0.0):
         """
         Propagate dead-reckoning position forward by dt.
         
@@ -157,6 +157,10 @@ class DeadReckoningNavigator:
             If None, uses last known speed.
         vz : float
             Vertical velocity (m/s).
+        pitch : float
+            Pitch angle in radians (for 3D projection).
+        roll : float
+            Roll angle in radians (for full 3D readiness).
         """
         if not self.active:
             return
@@ -168,10 +172,17 @@ class DeadReckoningNavigator:
         self.psi += omega_z * dt
         self.psi = (self.psi + np.pi) % (2.0 * np.pi) - np.pi
         
-        # Integrate position
-        self.px += self.v_fwd * np.cos(self.psi) * dt
-        self.py += self.v_fwd * np.sin(self.psi) * dt
-        self.pz += vz * dt
+        # Integrate position using 3D kinematics (Euler angle projection)
+        # TODO: For high-dynamic environments, replace with full quaternion strapdown integration.
+        v_horizontal = self.v_fwd * np.cos(pitch)
+        self.px += v_horizontal * np.cos(self.psi) * dt
+        self.py += v_horizontal * np.sin(self.psi) * dt
+        
+        # Use provided vertical velocity, or estimate from pitch
+        if vz != 0.0:
+            self.pz += vz * dt
+        else:
+            self.pz += self.v_fwd * np.sin(pitch) * dt
         
         # Track drift accumulation (IMU drift ~ 0.01 m/s² typical)
         self._time_in_dr += dt

@@ -1,0 +1,11 @@
+numpy>=1.20.0
+scipy>=1.7.0
+matplotlib>=3.4.0
+
+# Hardware interface dependencies (optional, install as needed for your platform)
+python-can>=4.0.0   # For CANBusAdapter
+pyserial>=3.5       # For UARTAdapter
+spidev>=3.5         # For SPIAdapter (Linux/Raspberry Pi only)
+
+# Note: ROS2 dependencies (rclpy, std_msgs) are provided by your ROS2 distribution (e.g., Humble/Iron) and are not installed via pip.
+# Note: filterpy is included locally in the `filterpy-master` directory.

@@ -225,7 +225,9 @@ class CommandValidator:
                                 f"Sequence {command.sequence_number} already used — replay attack")
         
         # Layer 3: Rate Limiting
-        recent_count = sum(1 for t in self._command_times if current_time - t < 60.0)
+        while self._command_times and current_time - self._command_times[0] >= 60.0:
+            self._command_times.popleft()
+        recent_count = len(self._command_times)
         if recent_count >= self._max_rate:
             return self._reject(CommandVerdict.RATE_LIMITED, command, dest,
                                 spatial_dist, current_time,
