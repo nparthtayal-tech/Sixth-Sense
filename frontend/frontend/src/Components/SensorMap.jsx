@@ -2,6 +2,7 @@ import React, { useEffect, useMemo } from "react";
 import {
   MapContainer,
   TileLayer,
+  ImageOverlay,
   Marker,
   Popup,
   Polyline,
@@ -274,8 +275,20 @@ function MapClickHandler({ onMapClick }) {
   return null;
 }
 
-function MapController({ route, vehiclePosition, followVehicle, source, destination }) {
+function MapController({ route, vehiclePosition, followVehicle, source, destination, envMode, floorPlanUrl, floorPlanBounds }) {
   const map = useMap();
+
+  // Fit bounds to Floor Plan and lock the camera
+  useEffect(() => {
+    if (envMode === "factory" && floorPlanUrl && floorPlanBounds) {
+      map.fitBounds(floorPlanBounds, { padding: [0, 0] });
+      map.setMaxBounds(floorPlanBounds);
+      map.setMinZoom(map.getBoundsZoom(floorPlanBounds, false));
+    } else {
+      map.setMaxBounds(null);
+      map.setMinZoom(0);
+    }
+  }, [envMode, floorPlanUrl, floorPlanBounds, map]);
 
   // Fit bounds when a new route is loaded
   useEffect(() => {
@@ -325,11 +338,22 @@ export default function SensorMap({
   quarantined = false,
   overrideToStart = false,
   followVehicle = true,
+  envMode = "outdoor",
+  floorPlanUrl = null,
+  floorPlanScale = 100,
+  customNodes = [],
+  customEdges = [],
   onMapClick,
   onSourceDrag,
   onDestDrag,
   onSpoofDrag
 }) {
+  const mapStyle = {
+    height: "100%",
+    width: "100%",
+    background: envMode === "factory" ? "#ffffff" : "#030a14",
+    cursor: selectionMode ? "crosshair" : "grab"
+  };
   const center = useMemo(() => {
     return vehiclePosition || source || destination || DEFAULT_CENTER;
   }, [vehiclePosition, source, destination]);
@@ -383,6 +407,24 @@ export default function SensorMap({
     );
   }
 
+  // Calculate Floor Plan Bounds
+  const floorPlanBounds = useMemo(() => {
+    if (!floorPlanScale) return [[0,0], [0,0]];
+    const lat = DEFAULT_CENTER[0];
+    const lng = DEFAULT_CENTER[1];
+    
+    // 1 degree latitude = ~111,320 meters
+    const lat_diff = floorPlanScale / 111320;
+    // 1 degree longitude = ~111,320 * cos(lat) meters
+    const lng_diff = floorPlanScale / (111320 * Math.cos(lat * Math.PI / 180));
+    
+    // Center the image exactly around DEFAULT_CENTER
+    return [
+      [lat - lat_diff / 2, lng - lng_diff / 2],
+      [lat + lat_diff / 2, lng + lng_diff / 2]
+    ];
+  }, [floorPlanScale]);
+
   return (
     <div className="tactical-map-viewport">
       {promptBanner}
@@ -393,13 +435,31 @@ export default function SensorMap({
         scrollWheelZoom={true}
         zoomControl={false}
         className="full-leaflet-canvas"
+        style={mapStyle}
       >
-        <TileLayer
-          attribution='&copy; <a href="https://carto.com/">CARTO</a> | &copy; OpenStreetMap'
-          url="https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png"
-          subdomains="abcd"
-          maxZoom={20}
-        />
+        {envMode === "outdoor" && (
+          <TileLayer
+            attribution='&copy; <a href="https://carto.com/">CARTO</a> | &copy; OpenStreetMap'
+            url="https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png"
+            subdomains="abcd"
+            maxZoom={20}
+          />
+        )}
+
+        {envMode === "factory" && floorPlanUrl && (
+          <ImageOverlay
+            url={floorPlanUrl}
+            bounds={floorPlanBounds}
+            opacity={0.85}
+          />
+        )}
+
+        {envMode === "factory" && !floorPlanUrl && (
+          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 1000, background: 'rgba(0,0,0,0.8)', padding: '20px', borderRadius: '10px', color: '#fff', border: '1px solid #00ff9d', textAlign: 'center' }}>
+             <h3>🏭 Factory Mode Active</h3>
+             <p>Please upload a floor plan image in the top control bar to begin tracking.</p>
+          </div>
+        )}
 
         <MapClickHandler onMapClick={onMapClick} />
 
@@ -409,6 +469,9 @@ export default function SensorMap({
           destination={destination}
           vehiclePosition={vehiclePosition}
           followVehicle={followVehicle}
+          envMode={envMode}
+          floorPlanUrl={floorPlanUrl}
+          floorPlanBounds={floorPlanBounds}
         />
 
         {/* Source Pin (Draggable when not flying) */}
@@ -491,6 +554,32 @@ export default function SensorMap({
             }}
           />
         )}
+
+        {/* AI-Generated NavMesh Rendering */}
+        {envMode === "factory" && customNodes && customNodes.map((node, idx) => (
+           <Circle
+             key={`ai-node-${idx}`}
+             center={node}
+             radius={0.8}
+             pathOptions={{ color: "#00bfff", fillColor: "#00bfff", fillOpacity: 0.8 }}
+             interactive={false}
+           />
+        ))}
+
+        {envMode === "factory" && customEdges && customEdges.map((edge, idx) => {
+           const n1 = customNodes[edge[0]];
+           const n2 = customNodes[edge[1]];
+           if (!n1 || !n2) return null;
+           return (
+             <Polyline
+               key={`ai-edge-${idx}`}
+               positions={[n1, n2]}
+               color="rgba(0, 191, 255, 0.3)"
+               weight={1.5}
+               interactive={false}
+             />
+           );
+        })}
 
         {/* Autonomous Recovery Corridor */}
         {recoveryRoute && recoveryRoute.length > 1 && (

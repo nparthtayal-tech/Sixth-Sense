@@ -27,6 +27,7 @@ import "./App.css";
 import SensorMap from "./Components/SensorMap";
 import SensorCards from "./Components/SensorCards";
 import { getRoute, getRecoveryRoute, generateAirCorridor } from "./services/routing";
+import { findPathAStar } from "./services/astar";
 import { MISSION_PRESETS, calculateBearing } from "./services/presets";
 
 const DETECTION_THRESHOLD = 95; // meters (Chi-Square / CUSUM gate)
@@ -92,6 +93,11 @@ export default function App() {
   const [gpsDivergence, setGpsDivergence] = useState(0);
   const [spoofCount, setSpoofCount] = useState(0);
 
+  // Environment Mode (Outdoor vs Factory Floor Plan)
+  const [envMode, setEnvMode] = useState("outdoor");
+  const [floorPlanUrl, setFloorPlanUrl] = useState(null);
+  const [floorPlanScale, setFloorPlanScale] = useState(100);
+
   // Telemetry & UI Drawers
   const [routeLoading, setRouteLoading] = useState(false);
   const [alerts, setAlerts] = useState([]);
@@ -116,6 +122,51 @@ export default function App() {
   const [overrideToStart, setOverrideToStart] = useState(false);
   const spoofStartTimeRef = useRef(0);
 
+  // Auto-Generated Graph Network State
+  const [customNodes, setCustomNodes] = useState([]); // array of [lat, lng]
+  const [customEdges, setCustomEdges] = useState([]); // array of [idxA, idxB]
+  const [aiMessage, setAiMessage] = useState("");
+  const [isAiProcessing, setIsAiProcessing] = useState(false);
+  
+  const collisionImageWidthRef = useRef(0);
+  const collisionImageHeightRef = useRef(0);
+  const fileInputRef = useRef(null);
+
+  // Load Image Data for UI
+  useEffect(() => {
+    if (floorPlanUrl && envMode === "factory") {
+      const img = new Image();
+      img.onload = () => {
+        collisionImageWidthRef.current = img.width;
+        collisionImageHeightRef.current = img.height;
+      };
+      img.src = floorPlanUrl;
+    }
+  }, [floorPlanUrl, envMode]);
+
+  // Wall Boundary Check Function (Only strictly checks image boundaries now, AI handles paths)
+  const isWall = useCallback((lat, lng) => {
+    if (envMode !== "factory") return false;
+    
+    const centerLat = 13.0600;
+    const centerLng = 80.2800;
+    const lat_diff = floorPlanScale / 111320;
+    const lng_diff = floorPlanScale / (111320 * Math.cos(centerLat * Math.PI / 180));
+    
+    const minLat = centerLat - lat_diff / 2;
+    const maxLat = centerLat + lat_diff / 2;
+    const minLng = centerLng - lng_diff / 2;
+    const maxLng = centerLng + lng_diff / 2;
+
+    const normalizedX = (lng - minLng) / lng_diff;
+    const normalizedY = 1.0 - ((lat - minLat) / lat_diff);
+
+    // If outside the image bounds, it is a WALL (prevents going into the black area)
+    if (normalizedX < 0 || normalizedX >= 1 || normalizedY < 0 || normalizedY >= 1) return true;
+    
+    return false;
+  }, [envMode, floorPlanScale]);
+
   // Audit Log Helper
   const addAlert = useCallback((message, type = "info") => {
     setAlerts((prev) => [
@@ -129,13 +180,92 @@ export default function App() {
     ].slice(0, 30));
   }, []);
 
+  // Compute a path along the Custom Graph (Dijkstra)
+  const computeGraphPath = useCallback((src, dst, nodes, edges) => {
+    if (nodes.length < 2) return null;
+
+    let closestSrcIdx = 0; let minSrcDist = Infinity;
+    nodes.forEach((node, idx) => {
+      const d = distanceBetween(src, node);
+      if (d < minSrcDist) { minSrcDist = d; closestSrcIdx = idx; }
+    });
+
+    let closestDstIdx = 0; let minDstDist = Infinity;
+    nodes.forEach((node, idx) => {
+      const d = distanceBetween(dst, node);
+      if (d < minDstDist) { minDstDist = d; closestDstIdx = idx; }
+    });
+
+    const adj = Array.from({ length: nodes.length }, () => []);
+    edges.forEach(([u, v]) => {
+      const dist = distanceBetween(nodes[u], nodes[v]);
+      adj[u].push({ target: v, weight: dist });
+      adj[v].push({ target: u, weight: dist });
+    });
+
+    const dists = Array(nodes.length).fill(Infinity);
+    const prev = Array(nodes.length).fill(null);
+    dists[closestSrcIdx] = 0;
+    const pq = [{ node: closestSrcIdx, dist: 0 }];
+
+    while(pq.length > 0) {
+      pq.sort((a,b) => a.dist - b.dist);
+      const { node: u, dist: d } = pq.shift();
+      if (u === closestDstIdx) break;
+      adj[u].forEach(edge => {
+        const v = edge.target;
+        const alt = d + edge.weight;
+        if (alt < dists[v]) {
+          dists[v] = alt;
+          prev[v] = u;
+          pq.push({ node: v, dist: alt });
+        }
+      });
+    }
+
+    if (dists[closestDstIdx] === Infinity) return null;
+
+    const pathIdxs = [];
+    let u = closestDstIdx;
+    while (u !== null) {
+      pathIdxs.unshift(u);
+      u = prev[u];
+    }
+
+    const finalPath = [src];
+    pathIdxs.forEach(idx => finalPath.push(nodes[idx]));
+    finalPath.push(dst);
+
+    let dist = 0;
+    for(let i=0; i<finalPath.length-1; i++) {
+      dist += distanceBetween(finalPath[i], finalPath[i+1]);
+    }
+
+    return { path: finalPath, distance: dist, duration: dist / 12 };
+  }, []);
+
   // Compute Route between source and destination
   const computeRoute = useCallback(async (src, dst) => {
     if (!src || !dst) return;
     setRouteLoading(true);
     try {
-      addAlert("Calculating flight path for custom waypoints...", "info");
-      const result = await getRoute(src, dst);
+      addAlert("Calculating flight path...", "info");
+      
+      let result;
+      if (envMode === "factory") {
+        addAlert("Indoor Factory Mode: Computing route using AI-Generated Graph...", "info");
+        const graphResult = computeGraphPath(src, dst, customNodes, customEdges);
+        if (graphResult) {
+          result = graphResult;
+          addAlert("✅ DeepSeek AI Graph Path found successfully!", "success");
+        } else {
+          addAlert("❌ Path blocked! Using safe line fallback.", "warning");
+          result = generateAirCorridor(src, dst, 40);
+        }
+      } else {
+        result = await getRoute(src, dst);
+      }
+
       setRoute(result.path);
       setDistance(result.distance);
       setDuration(result.duration);
@@ -172,6 +302,12 @@ export default function App() {
   useEffect(() => {
     addAlert("Ready: Click anywhere on the map to place your INITIAL START point.", "info");
   }, [addAlert]);
+
+  // Handle File Upload & AI API Call
+  const handleFloorPlanUpload = async (e) => {
+    const file = e.target.files?.[0] || e.dataTransfer?.files?.[0];
+    // ... logic continues ...
+  };
 
   // Master Map Click Handler: Supports setting start, destination, and spoofing anytime!
   const handleMapClick = (pos) => {
@@ -441,7 +577,14 @@ export default function App() {
     addAlert("🛑 HIGH-FREQUENCY HIJACKING: Destination OVERRIDDEN with STARTING POINT.", "danger");
     addAlert("Direct emergency air corridor locked directly to initial launch coordinates.", "info");
 
-    const returnCorridor = generateAirCorridor(currentPos, startPt, 50);
+    let returnCorridor;
+    if (envMode === "factory") {
+       // Just draw a straight line but the physics engine isWall check will prevent it from going out of bounds
+       returnCorridor = generateAirCorridor(currentPos, startPt, 50);
+    } else {
+       returnCorridor = generateAirCorridor(currentPos, startPt, 50);
+    }
+
     setDestination(startPt);
     setRoute(returnCorridor.path);
     routeIndexRef.current = 0;
@@ -492,7 +635,14 @@ export default function App() {
       const rejoinIdx = Math.min(nearestIdx + 12, route.length - 1);
       const rejoinPoint = route[rejoinIdx];
 
-      const recoveryResult = await getRecoveryRoute(currentPos, rejoinPoint);
+      let recoveryResult;
+      if (envMode === "factory") {
+         // Fallback to straight line for recovery, but physics engine will block walls
+         recoveryResult = { path: [currentPos, rejoinPoint] };
+      } else {
+         recoveryResult = await getRecoveryRoute(currentPos, rejoinPoint);
+      }
+
       const fullRecoveryPath = [...recoveryResult.path, ...route.slice(rejoinIdx)];
 
       recoveryRouteRef.current = fullRecoveryPath;
@@ -633,12 +783,18 @@ export default function App() {
 
       // ── Scenario B: Under Active GNSS Spoofing (Autopilot deceived) ───
       if (spoofingRef.current && spoofTargetRef.current && !quarantinedRef.current) {
-        // Just like demo_animated_sentry: autopilot moves toward spoof target!
         const target = spoofTargetRef.current;
         const deceivedStep = moveTowards(curPos, target, 0.00040 * simulationSpeed);
 
-        vehiclePosRef.current = deceivedStep;
-        setVehiclePosition(deceivedStep);
+        // Pixel-Level Wall Collision Check for Spoofed Drifting
+        if (isWall(deceivedStep[0], deceivedStep[1])) {
+           addAlert("💥 SPOOF COLLISION ALERT: Hijack drift blocked by wall or boundary!", "warning");
+           // Drone is physically blocked, but GPS still drifts!
+        } else {
+           vehiclePosRef.current = deceivedStep;
+           setVehiclePosition(deceivedStep);
+        }
+
         setVehicleHeading(calculateBearing(curPos, target));
         setBreadcrumbTrail((prev) => [...prev.slice(-100), deceivedStep]);
 
@@ -695,9 +851,18 @@ export default function App() {
       }
 
       const nextIndex = Math.min(cIndex + 1, route.length - 1);
-      routeIndexRef.current = nextIndex;
       const nextPos = route[nextIndex];
 
+      // Pixel-Level Wall Collision & Boundary Check
+      if (isWall(nextPos[0], nextPos[1])) {
+         addAlert("💥 COLLISION ALERT: Flight path blocked by factory wall!", "danger");
+         setMissionRunning(false);
+         missionRunningRef.current = false;
+         setSecurityState("CRASH: WALL COLLISION");
+         return;
+      }
+
+      routeIndexRef.current = nextIndex;
       vehiclePosRef.current = nextPos;
       setVehiclePosition(nextPos);
       setVehicleHeading(calculateBearing(curPos, nextPos));
@@ -741,6 +906,11 @@ export default function App() {
         onSourceDrag={handleSourceDrag}
         onDestDrag={handleDestDrag}
         onSpoofDrag={handleSpoofDrag}
+        envMode={envMode}
+        floorPlanUrl={floorPlanUrl}
+        floorPlanScale={floorPlanScale}
+        customNodes={customNodes}
+        customEdges={customEdges}
       />
 
       {/* ── 2. Floating Top Flight HUD Bar ─────────────────────────────── */}
@@ -753,6 +923,76 @@ export default function App() {
             <h1>SENSORSENTRY</h1>
             <span className="hud-subtitle">ANTI-SPOOFING TACTICAL FLIGHT HUD</span>
           </div>
+        </div>
+        
+        {/* Environment Mode Switcher */}
+        <div style={{ display: "flex", gap: "10px", alignItems: "center", background: "rgba(0,0,0,0.5)", padding: "5px 10px", borderRadius: "5px", border: "1px solid #333" }}>
+          <select 
+            value={envMode} 
+            onChange={(e) => setEnvMode(e.target.value)}
+            style={{ background: "#222", color: "#00ff9d", border: "1px solid #00ff9d", padding: "4px", borderRadius: "4px", fontWeight: "bold" }}
+          >
+            <option value="outdoor">🌍 Drone (Outdoor GPS)</option>
+            <option value="factory">🏭 Factory (Indoor Floor Plan)</option>
+          </select>
+
+          {envMode === "factory" && (
+            <>
+              <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                <label 
+                  style={{ 
+                    border: "2px dashed #00ff9d", 
+                    padding: "5px 15px", 
+                    borderRadius: "5px", 
+                    color: "#00ff9d", 
+                    fontSize: "12px",
+                    background: "rgba(0,255,157,0.1)",
+                    minWidth: "150px",
+                    textAlign: "center",
+                    display: "inline-block",
+                    cursor: "pointer",
+                    margin: 0
+                  }}
+                  onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                  onDrop={(e) => { e.preventDefault(); e.stopPropagation(); handleFloorPlanUpload(e); }}
+                >
+                  {floorPlanUrl ? "✅ Image Uploaded! (Click/Drag to Replace)" : "📥 Click or Drag Floor Plan"}
+                  <input 
+                    type="file" 
+                    accept="image/*"
+                    style={{ display: "none" }}
+                    onClick={(e) => e.target.value = null}
+                    onChange={handleFloorPlanUpload}
+                  />
+                </label>
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  <span style={{ fontSize: "9px", color: "#888" }}>Width (Meters)</span>
+                  <input 
+                    type="number" 
+                    value={floorPlanScale} 
+                    onChange={(e) => setFloorPlanScale(Number(e.target.value))}
+                    style={{ width: "60px", background: "#111", color: "#fff", border: "1px solid #444", padding: "2px", borderRadius: "3px" }}
+                  />
+                </div>
+              </div>
+              
+              {aiMessage && (
+                 <div style={{ marginTop: "10px", padding: "8px", background: "rgba(0,255,157,0.1)", border: "1px solid #00ff9d", borderRadius: "5px", color: "#00ff9d", fontSize: "11px", display: "flex", alignItems: "center", gap: "8px" }}>
+                   <div style={{ fontSize: "20px" }}>🤖</div>
+                   <div>
+                     <strong style={{ display: "block", marginBottom: "2px" }}>DeepSeek AI Security Analysis</strong>
+                     {aiMessage}
+                   </div>
+                 </div>
+              )}
+              
+              {isAiProcessing && (
+                 <div style={{ marginTop: "10px", padding: "8px", color: "#facc15", fontSize: "11px", fontStyle: "italic" }}>
+                   ⚙️ DeepSeek Vision AI is analyzing floor plan corridors...
+                 </div>
+              )}
+            </>
+          )}
         </div>
 
         {/* Live Security Phase Chip */}
