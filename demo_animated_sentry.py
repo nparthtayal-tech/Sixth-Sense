@@ -42,7 +42,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "filterpy-master"))
 
-from decision_making import ChiSquareGate, CusumMonitor
+from decision_making import ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus
 from decision_making.cusum_monitor import DriftStatus
 from ekf_fusion import MultiSensorEKF, SensorType
 from ekf_fusion.sensor_models import (
@@ -263,6 +263,7 @@ class InteractiveSpoofDemo:
             recovery_rate=0.0,
             auto_recover_after=0,
         )
+        self.ml_monitor = LSTMAutoEncoderMonitor(alarm_threshold=220.0, warning_threshold=90.0)
         # Sensor noise covariance matrices
         self._gnss_R = gnss_default_R(sigma_pos=1.5, sigma_alt=2.5, sigma_vel=0.1)
         self._imu_R = imu_default_R(sigma_gyro=0.005, sigma_accel=0.05)
@@ -273,6 +274,9 @@ class InteractiveSpoofDemo:
         self.nis = 0.0
         self.nis_threshold = self.chi_gate._chi2_threshold(6)
         self.cusum_value = 0.0
+        self.ml_mse = 0.0
+        self.ml_status = MLStatus.HEALTHY
+        self._ml_logged = False
         self.last_gps = START.copy()
         self.gps_position = START.copy()
         self.trusted_position = START.copy()
@@ -283,7 +287,7 @@ class InteractiveSpoofDemo:
             Event(0.0, "READY: Select route, launch mission, then click map to inject a spoofed target.", BLUE),
         ]
         self.history = {
-            "time": [], "physical": [], "trusted": [], "gps": [], "nis": [], "cusum": [],
+            "time": [], "physical": [], "trusted": [], "gps": [], "nis": [], "cusum": [], "ml_mse": [],
         }
 
     def _add_event(self, message: str, colour: str) -> None:
@@ -352,9 +356,11 @@ class InteractiveSpoofDemo:
         if self.phase == "NOMINAL":
             self.cusum.reset("GNSS")
             self.chi_gate = ChiSquareGate(confidence=0.999)
+            self.ml_monitor.reset("GNSS")
             self.chi_rejection_count = 0
             self._chi_logged = False
             self._warning_logged = False
+            self._ml_logged = False
 
         if is_reassign:
             prefix = "REPLAY RE-SPOOF: " if from_replay else f"RE-SPOOF #{self.spoof_count}: "
@@ -606,9 +612,11 @@ class InteractiveSpoofDemo:
         # Reset detection state for fresh monitoring
         self.cusum.reset("GNSS")
         self.chi_gate = ChiSquareGate(confidence=0.999)
+        self.ml_monitor.reset("GNSS")
         self.chi_rejection_count = 0
         self._chi_logged = False
         self._warning_logged = False
+        self._ml_logged = False
         self._server_link_logged = False
         self.detection_time = None
         self.server_authorization_time = None
@@ -670,16 +678,19 @@ class InteractiveSpoofDemo:
         dim_m = len(z_gnss)
         self.ekf_innovation_mag = float(np.linalg.norm(y[0:2]))
 
-        # Feed innovation to Chi-Square (fast) and CUSUM (slow)
+        # Feed innovation to Chi-Square (fast), CUSUM (slow), and LSTM-AE (ML)
         fast_signal = self.chi_gate.evaluate("GNSS", self.time_s, y, S, dim_m)
         slow_signal = self.cusum.evaluate("GNSS", self.time_s, y, S, dim_m)
+        ml_signal = self.ml_monitor.evaluate("GNSS", self.time_s, y, S, dim_m)
         self.nis = fast_signal.nis
         self.nis_threshold = fast_signal.threshold
         self.cusum_value = slow_signal.cusum_value
+        self.ml_mse = ml_signal.reconstruction_error
+        self.ml_status = ml_signal.status
         self.last_gps = self.gps_position.copy()
 
-        # 7. Apply GNSS update ONLY if monitors accept
-        if fast_signal.verdict.name == "ACCEPT" and slow_signal.accepted:
+        # 7. Apply GNSS update ONLY if all monitors accept
+        if fast_signal.verdict.name == "ACCEPT" and slow_signal.accepted and ml_signal.accepted:
             self.ekf.apply_update(y, S, H, PHT, self._gnss_R)
             self.gnss_accepted = True
         else:
@@ -702,12 +713,20 @@ class InteractiveSpoofDemo:
                 f"(alarm at {self.cusum.alarm_threshold:.0f}).",
                 ORANGE,
             )
-        if self.phase == "NOMINAL" and self.spoof_active and slow_signal.status == DriftStatus.ALARM:
+        if ml_signal.status == MLStatus.WARNING and not self._ml_logged:
+            self._ml_logged = True
+            self._add_event(
+                f"LSTM-AE ML WARNING: Sequence reconstruction loss MSE={self.ml_mse:.1f} (thresh={self.ml_monitor.alarm_threshold:.0f}).",
+                ORANGE,
+            )
+        # Quarantines on CUSUM alarm OR ML alarm
+        if self.phase == "NOMINAL" and self.spoof_active and (slow_signal.status == DriftStatus.ALARM or ml_signal.status == MLStatus.ALARM):
             self.phase = "QUARANTINED"
             self.detection_time = self.time_s
             self.bus.send(b"GPS_QUARANTINED", "SAARM")
+            trigger_src = "CUSUM + LSTM-AE" if (slow_signal.status == DriftStatus.ALARM and ml_signal.status == MLStatus.ALARM) else ("LSTM-AE ML" if ml_signal.status == MLStatus.ALARM else "CUSUM")
             self._add_event(
-                f"CUSUM ALARM: Persistent GNSS drift confirmed (CUSUM={self.cusum_value:.0f}). "
+                f"ANOMALY CONFIRMED ({trigger_src}): Persistent GNSS drift confirmed. "
                 "SAARM isolates GNSS; drone holds on EKF fusion of IMU+Camera+LiDAR.",
                 YELLOW,
             )
@@ -752,6 +771,7 @@ class InteractiveSpoofDemo:
         self.history["gps"].append(self.gps_position.copy())
         self.history["nis"].append(self.nis)
         self.history["cusum"].append(self.cusum_value)
+        self.history["ml_mse"].append(self.ml_mse)
 
     # ════════════════════════════════════════════════════════════════════
     # FIGURE BUILDING
@@ -859,6 +879,7 @@ class InteractiveSpoofDemo:
         ax.axhline(1.0, color=RED, lw=1.2, ls="--", label="Alarm threshold")
         self.nis_line, = ax.plot([], [], color=PURPLE, lw=1.8, label="χ²: GNSS NIS via EKF")
         self.cusum_line, = ax.plot([], [], color=YELLOW, lw=1.8, label="CUSUM: accumulated drift")
+        self.ml_line, = ax.plot([], [], color=CYAN, lw=1.6, ls=":", label="LSTM-AE: sequence loss")
         ax.grid(True)
         ax.legend(loc="upper left", fontsize=7.2, framealpha=0.92, facecolor=PANEL, edgecolor=GRID)
         ax.text(
@@ -928,7 +949,7 @@ class InteractiveSpoofDemo:
 
         self.fig.text(
             0.975, 0.057,
-            "EKF: 11-state MultiSensorEKF  •  Sensors: GNSS+IMU+Camera+LiDAR",
+            "EKF: 11-state MultiSensorEKF  •  Monitors: Chi² + CUSUM + LSTM-AE ML  •  Sensors: GNSS+IMU+Camera+LiDAR",
             color=MUTED, fontsize=8, ha="right", va="center",
         )
 
@@ -1013,15 +1034,17 @@ class InteractiveSpoofDemo:
         self.status_text.set_bbox(dict(boxstyle="round,pad=0.45", facecolor=colour, alpha=0.90))
         normalized_nis = np.minimum(np.asarray(self.history["nis"]) / max(self.nis_threshold, 1e-9), 1.30)
         normalized_cusum = np.minimum(np.asarray(self.history["cusum"]) / self.cusum.alarm_threshold, 1.30)
+        normalized_ml = np.minimum(np.asarray(self.history["ml_mse"]) / max(self.ml_monitor.alarm_threshold, 1e-9), 1.30)
         self.nis_line.set_data(times, normalized_nis)
         self.cusum_line.set_data(times, normalized_cusum)
+        self.ml_line.set_data(times, normalized_ml)
 
         # State panel: reflects actual onboard detector verdict, no ground-truth leak
         if self.phase in {"QUARANTINED", "SERVER_VERIFYING", "RECOVERING"}:
             gps_state = "QUARANTINED"
             state_color = YELLOW
-        elif self.cusum_value >= self.cusum.warning_threshold or self.chi_rejection_count > 0:
-            gps_state = "SUSPECT (DRIFT)"
+        elif self.cusum_value >= self.cusum.warning_threshold or self.chi_rejection_count > 0 or self.ml_status != MLStatus.HEALTHY:
+            gps_state = "SUSPECT (DRIFT/ANOMALY)"
             state_color = ORANGE
         else:
             gps_state = "HEALTHY (TRACKING)"
@@ -1037,6 +1060,7 @@ class InteractiveSpoofDemo:
             f"GNSS STATUS         {gps_state}",
             f"GNSS → EKF FUSED    {gnss_fused}",
             f"GNSS INNOVATION     {self.ekf_innovation_mag:.2f} m",
+            f"LSTM-AE ML LOSS     {self.ml_mse:.1f} ({self.ml_status.name})",
             "",
             "EKF SENSOR INPUTS",
             f"  IMU  (predict+update) {self.sensor_residuals['IMU']:.2f} m",

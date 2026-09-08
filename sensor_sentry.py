@@ -28,7 +28,7 @@ from ekf_fusion.sensor_models import (
     lidar_h, lidar_H, lidar_residual, five_g_h, five_g_H,
     atomic_clock_h, atomic_clock_H
 )
-from decision_making import ChiSquareGate, CusumMonitor
+from decision_making import ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus
 from saarm import SaarmFilterBank, SaarmVerdict
 from waypoint_security import (
     CommandValidator, WaypointCommand, CommandVerdict,
@@ -53,9 +53,10 @@ class SensorSentry:
         self.latest_omega = 0.0
         self.latest_accel = 0.0
         
-        # 2. Monitors & SAARM (Scenario A Defense)
+        # 2. Monitors & SAARM (Scenario A Defense: Fast, Slow, and ML)
         self.chi_square = ChiSquareGate(confidence=0.999)
         self.cusum = CusumMonitor(alarm_threshold=10.0, warning_threshold=5.0, slack=0.5)
+        self.ml_monitor = LSTMAutoEncoderMonitor()
         self.saarm = SaarmFilterBank(isolation_threshold=2.0, min_alarm_count=3)
         
         # 3. Waypoint Security (Scenario B Defense)
@@ -139,6 +140,9 @@ class SensorSentry:
         # 3. Slow Monitor (Drift detection)
         slow_sig = self.cusum.evaluate(st_name, t, y, S, m)
         
+        # 3b. ML Monitor (Temporal sequence anomaly detection via LSTM-AE)
+        ml_sig = self.ml_monitor.evaluate(st_name, t, y, S, m)
+        
         # NIS is recorded for SAARM background checks
         try:
             SI = np.linalg.inv(S)
@@ -147,8 +151,8 @@ class SensorSentry:
             nis = float(np.sum(y**2))
         self.saarm.record_residual(st_name, nis)
         
-        # 4. SAARM Isolation Check
-        if slow_sig.status.value >= 2: # ALARM
+        # 4. SAARM Isolation Check (triggered by CUSUM alarm OR ML alarm)
+        if slow_sig.status.value >= 2 or ml_sig.status == MLStatus.ALARM:
             saarm_sig = self.saarm.process_alarm(
                 st_name, t, slow_sig.cusum_value,
                 self.ekf.x, self.ekf.x[6], np.linalg.norm(self.ekf.x[3:5])
@@ -169,8 +173,8 @@ class SensorSentry:
                 # Do not apply update from this compromised sensor
                 return True 
                 
-        # 5. Fuse healthy data
-        if slow_sig.accepted:
+        # 5. Fuse healthy data (both slow monitor and ML monitor accept)
+        if slow_sig.accepted and ml_sig.accepted:
             self.ekf.apply_update(y, S, H, PHT, R_cov)
             
         return True

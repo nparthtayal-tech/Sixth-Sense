@@ -13,7 +13,12 @@ Each monitor operates independently. They can be used standalone,
 together, or piped into downstream hardware controllers.
 """
 
-from .chi_square_gate import ChiSquareGate
-from .cusum_monitor import CusumMonitor
+from .chi_square_gate import ChiSquareGate, FastVerdict, DecisionSignal
+from .cusum_monitor import CusumMonitor, DriftStatus, DriftSignal
+from .ml_monitor import LSTMAutoEncoderMonitor, MLStatus, MLSignal
 
-__all__ = ['ChiSquareGate', 'CusumMonitor']
+__all__ = [
+    'ChiSquareGate', 'FastVerdict', 'DecisionSignal',
+    'CusumMonitor', 'DriftStatus', 'DriftSignal',
+    'LSTMAutoEncoderMonitor', 'MLStatus', 'MLSignal',
+]
