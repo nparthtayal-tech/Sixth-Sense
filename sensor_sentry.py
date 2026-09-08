@@ -13,6 +13,7 @@ Handles:
 
 import time
 import numpy as np
+from dataclasses import dataclass
 from typing import Optional, List, Tuple
 
 import sys
@@ -28,7 +29,11 @@ from ekf_fusion.sensor_models import (
     lidar_h, lidar_H, lidar_residual, five_g_h, five_g_H,
     atomic_clock_h, atomic_clock_H
 )
-from decision_making import ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus
+from decision_making import (
+    ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus,
+    DirectionalSpoofDetector, DirectionalStatus, DirectionalSpoofSignal,
+    HighFrequencyAttackDetector, AttackPattern, HighFrequencySignal,
+)
 from saarm import SaarmFilterBank, SaarmVerdict
 from waypoint_security import (
     CommandValidator, WaypointCommand, CommandVerdict,
@@ -37,6 +42,45 @@ from waypoint_security import (
 )
 from response import SafeStopController, SafeStopState, FleetAlertBroadcaster
 from hal import HardwareBus, SensorReading
+
+
+@dataclass(frozen=True)
+class DirectionalRecoveryGuidance:
+    """Trusted navigation command produced after directional GNSS spoofing.
+
+    An autopilot adapter should use ``direction_unit_xy`` to steer from the
+    independent navigation estimate toward the already-authorized mission
+    target.  It must never derive this target from a newly received GNSS fix.
+    """
+    timestamp: float
+    source_sensor: str
+    trusted_position: np.ndarray
+    target_position: np.ndarray
+    direction_unit_xy: np.ndarray
+    distance_to_target_m: float
+    attack_heading_deg: float
+
+
+@dataclass(frozen=True)
+class NegativeDriftGuidance:
+    """Guidance command calculated to cancel continuous cyber attack drift and return to start location.
+
+    When high-frequency attacks occur, this guidance provides the negative drift
+    vector and unit heading vector directly back to the verified launch origin.
+    It strictly forbids proceeding toward newly injected destinations.
+    """
+    timestamp: float
+    source_sensor: str
+    trusted_position: np.ndarray
+    start_position: np.ndarray
+    overall_drift_vector: np.ndarray
+    overall_drift_magnitude_m: float
+    negative_drift_vector: np.ndarray
+    direction_unit_xy: np.ndarray
+    distance_to_start_m: float
+    attack_frequency_hz: float
+    attack_pattern: AttackPattern
+    override_active: bool
 
 
 class SensorSentry:
@@ -53,10 +97,15 @@ class SensorSentry:
         self.latest_omega = 0.0
         self.latest_accel = 0.0
         
-        # 2. Monitors & SAARM (Scenario A Defense: Fast, Slow, and ML)
+        # 2. Monitors & SAARM (Scenario A Defense: Fast, Slow, ML, and Directional Vector)
         self.chi_square = ChiSquareGate(confidence=0.999)
         self.cusum = CusumMonitor(alarm_threshold=10.0, warning_threshold=5.0, slack=0.5)
         self.ml_monitor = LSTMAutoEncoderMonitor()
+        self.directional_detector = DirectionalSpoofDetector(
+            window_size=5,
+            cumulative_threshold=15.0,
+            coherence_threshold=0.80
+        )
         self.saarm = SaarmFilterBank(isolation_threshold=2.0, min_alarm_count=3)
         
         # 3. Waypoint Security (Scenario B Defense)
@@ -69,13 +118,173 @@ class SensorSentry:
         self.fleet_alert = FleetAlertBroadcaster(vehicle_id=vehicle_id)
         
         self.current_destination: Optional[np.ndarray] = None
+        self.start_position: Optional[np.ndarray] = None
+        self.hf_detector = HighFrequencyAttackDetector(
+            freq_threshold_hz=1.0,
+            burst_window_s=5.0,
+            burst_count_threshold=5,
+            drift_override_threshold_m=4.0,
+        )
+        self._return_to_start_override: bool = False
+        self._negative_drift_guidance: Optional[NegativeDriftGuidance] = None
+        # Position fixed only by healthy non-GNSS measurements.  This becomes
+        # the dead-reckoning origin if GNSS is later confirmed compromised.
+        self._last_independent_position = self.ekf.x[0:3].copy()
+        self._directional_recovery: Optional[DirectionalRecoveryGuidance] = None
         
     def initialize_state(self, initial_position: np.ndarray, initial_heading: float):
         """Set starting position before taking off/driving."""
         self.ekf.x[0:3] = initial_position
         self.ekf.x[6] = initial_heading
         self.last_update_time = time.time()
+        self.start_position = np.asarray(initial_position, dtype=float).copy()
+        self.hf_detector.set_start_position(self.start_position)
+        self._last_independent_position = self.ekf.x[0:3].copy()
+        self._directional_recovery = None
+        self._return_to_start_override = False
+        self._negative_drift_guidance = None
         self.safe_stop.update_good_position(initial_position)
+
+    def get_negative_drift_guidance(self) -> Optional[NegativeDriftGuidance]:
+        """Return live negative-drift compensation and homing guidance back to start location.
+
+        Used when high-frequency continuous cyber attacks require an emergency override
+        back to the initial launch point rather than proceeding to forward or new destinations.
+        """
+        if not self._return_to_start_override or self.start_position is None:
+            return None
+
+        trusted_position = self.get_current_position().copy()
+        overall_drift, drift_mag, negative_drift = self.hf_detector.calculate_drift(trusted_position)
+        
+        delta_to_start = self.start_position[:2] - trusted_position[:2]
+        dist_to_start = float(np.linalg.norm(delta_to_start))
+        direction = delta_to_start / dist_to_start if dist_to_start > 1e-6 else np.zeros(2)
+        
+        sig = self.hf_detector.record_and_evaluate(
+            "GNSS", self.last_update_time, np.zeros(2), trusted_position, is_attack_sample=False
+        )
+
+        return NegativeDriftGuidance(
+            timestamp=self.last_update_time,
+            source_sensor="GNSS",
+            trusted_position=trusted_position,
+            start_position=self.start_position.copy(),
+            overall_drift_vector=overall_drift,
+            overall_drift_magnitude_m=drift_mag,
+            negative_drift_vector=negative_drift,
+            direction_unit_xy=direction,
+            distance_to_start_m=dist_to_start,
+            attack_frequency_hz=sig.attack_frequency_hz,
+            attack_pattern=sig.attack_pattern,
+            override_active=True,
+        )
+
+    def _start_return_to_start_override(self, sensor: str, timestamp: float,
+                                        hf_sig: HighFrequencySignal) -> None:
+        """Quarantine sensor, lock override to return to start location, and forbid new destinations."""
+        self._return_to_start_override = True
+        
+        # Override target to start location (no new destinations allowed)
+        if self.start_position is not None:
+            self.current_destination = self.start_position.copy()
+            if self._directional_recovery is not None:
+                self._directional_recovery.target_position = self.start_position.copy()
+
+        # Isolate GNSS source
+        trusted_state = self.ekf.x.copy()
+        trusted_state[0:3] = self._last_independent_position
+        saarm_sig = self.saarm.force_isolate(
+            sensor, timestamp, trusted_state, self.ekf.x[6],
+            np.linalg.norm(self.ekf.x[3:5]),
+        )
+        self.bus.send(saarm_sig.to_bytes(), 'SAARM')
+
+        # Broadcast emergency high-frequency spoof alert
+        alert = self.fleet_alert.create_gps_spoof_alert(
+            timestamp=timestamp,
+            position=self._last_independent_position,
+            heading=self.get_current_heading(),
+            speed=np.linalg.norm(self.ekf.x[3:6]),
+            cusum_value=self.cusum.alarm_threshold,
+            residual=hf_sig.overall_drift_magnitude,
+        )
+        self.bus.send(alert.to_bytes(), 'ALERT')
+
+    def get_directional_recovery_guidance(self) -> Optional[DirectionalRecoveryGuidance]:
+        """Return live guidance to the authorised target during GNSS recovery.
+
+        ``None`` means no directional GNSS attack is active, or no authenticated
+        mission destination is known.  The guidance vector is recomputed from
+        the dead-reckoning / independent estimate on every call.
+        """
+        if self._directional_recovery is None:
+            return None
+
+        trusted_position = self.get_current_position().copy()
+        if self._return_to_start_override and self.start_position is not None:
+            target_position = self.start_position.copy()
+        else:
+            target_position = self._directional_recovery.target_position.copy()
+        delta_xy = target_position[:2] - trusted_position[:2]
+        distance = float(np.linalg.norm(delta_xy))
+        direction = delta_xy / distance if distance > 1e-6 else np.zeros(2)
+        return DirectionalRecoveryGuidance(
+            timestamp=self._directional_recovery.timestamp,
+            source_sensor=self._directional_recovery.source_sensor,
+            trusted_position=trusted_position,
+            target_position=target_position,
+            direction_unit_xy=direction,
+            distance_to_target_m=distance,
+            attack_heading_deg=self._directional_recovery.attack_heading_deg,
+        )
+
+    def _start_directional_recovery(self, sensor: str, timestamp: float,
+                                    attack_heading_deg: float) -> None:
+        """Quarantine a confirmed source and retain the signed mission target."""
+        if self._directional_recovery is not None:
+            return
+
+        # Do not seed dead reckoning from a state that may already have been
+        # pulled by GNSS.  Use the newest healthy non-GNSS estimate instead.
+        trusted_state = self.ekf.x.copy()
+        trusted_state[0:3] = self._last_independent_position
+        saarm_sig = self.saarm.force_isolate(
+            sensor, timestamp, trusted_state, self.ekf.x[6],
+            np.linalg.norm(self.ekf.x[3:5]),
+        )
+        self.bus.send(saarm_sig.to_bytes(), 'SAARM')
+
+        alert = self.fleet_alert.create_gps_spoof_alert(
+            timestamp=timestamp,
+            position=self._last_independent_position,
+            heading=self.get_current_heading(),
+            speed=np.linalg.norm(self.ekf.x[3:6]),
+            cusum_value=self.directional_detector.cumulative_threshold,
+            residual=self.directional_detector.cumulative_threshold,
+        )
+        self.bus.send(alert.to_bytes(), 'ALERT')
+
+        # A safe redirect is possible only toward a destination that passed
+        # command authentication before the attack.  Without one, keeping the
+        # aircraft in a hold/loiter mode is safer than inventing a target.
+        if self.current_destination is None:
+            return
+
+        target = np.asarray(self.current_destination, dtype=float).copy()
+        trusted_position = self.get_current_position().copy()
+        delta_xy = target[:2] - trusted_position[:2]
+        distance = float(np.linalg.norm(delta_xy))
+        direction = delta_xy / distance if distance > 1e-6 else np.zeros(2)
+        self._directional_recovery = DirectionalRecoveryGuidance(
+            timestamp=timestamp,
+            source_sensor=sensor,
+            trusted_position=trusted_position,
+            target_position=target,
+            direction_unit_xy=direction,
+            distance_to_target_m=distance,
+            attack_heading_deg=attack_heading_deg,
+        )
         
     def _get_sensor_dispatch(self, sensor_type: str) -> tuple:
         """Map string sensor type to EKF model functions."""
@@ -131,6 +340,43 @@ class SensorSentry:
         z = np.atleast_1d(reading.data)
         y, S, H, PHT = self.ekf.compute_innovation(z, H_func, h_func, R_cov, args, res_func)
         m = len(z)
+
+        # Directional evidence must see every GNSS innovation, including a
+        # large fix that the instantaneous gate will reject below.  Otherwise
+        # a fast spoof can continually bypass the sequential detector.
+        dir_sig = self.directional_detector.evaluate(st_name, t, y)
+        if dir_sig.status == DirectionalStatus.DIRECTIONAL_ATTACK:
+            if st_name == 'GNSS':
+                self._start_directional_recovery(st_name, t, dir_sig.attack_heading_deg)
+            else:
+                self.saarm.force_isolate(
+                    st_name, t, self.ekf.x, self.ekf.x[6],
+                    np.linalg.norm(self.ekf.x[3:5]),
+                )
+
+        # Evaluate High-Frequency Cyber Attack & Negative Drift Detector
+        cur_pos = self.get_current_position()
+        y_vec = np.atleast_1d(y)
+        pos_dim = min(2, len(y_vec))
+        y_mag = float(np.linalg.norm(y_vec[:pos_dim])) if pos_dim > 0 else 0.0
+        is_attack_candidate = (
+            dir_sig.status != DirectionalStatus.HEALTHY
+            or y_mag > 2.0
+        )
+        hf_sig = self.hf_detector.record_and_evaluate(
+            st_name, t, y, cur_pos, is_attack_sample=is_attack_candidate
+        )
+        if hf_sig.override_to_start:
+            if st_name == 'GNSS':
+                self._start_return_to_start_override(st_name, t, hf_sig)
+            else:
+                self.saarm.force_isolate(
+                    st_name, t, self.ekf.x, self.ekf.x[6],
+                    np.linalg.norm(self.ekf.x[3:5]),
+                )
+
+        if dir_sig.status == DirectionalStatus.DIRECTIONAL_ATTACK or hf_sig.override_to_start:
+            return True  # Never fuse an innovation from a confirmed attack.
         
         # 2. Fast Monitor (Spike rejection)
         fast_sig = self.chi_square.evaluate(st_name, t, y, S, m)
@@ -151,6 +397,14 @@ class SensorSentry:
             nis = float(np.sum(y**2))
         self.saarm.record_residual(st_name, nis)
         
+        # If suspicious, sanitize innovation vector (ignore the drift along attack direction)
+        if dir_sig.status == DirectionalStatus.SUSPICIOUS:
+            # The monitor evaluates horizontal position only, whereas an EKF
+            # GNSS innovation also contains altitude and velocity terms.
+            # Preserve those dimensions so the Kalman update remains valid.
+            y = y.copy()
+            y[:len(dir_sig.sanitized_vector)] = dir_sig.sanitized_vector
+
         # 4. SAARM Isolation Check (triggered by CUSUM alarm OR ML alarm)
         if slow_sig.status.value >= 2 or ml_sig.status == MLStatus.ALARM:
             saarm_sig = self.saarm.process_alarm(
@@ -176,6 +430,8 @@ class SensorSentry:
         # 5. Fuse healthy data (both slow monitor and ML monitor accept)
         if slow_sig.accepted and ml_sig.accepted:
             self.ekf.apply_update(y, S, H, PHT, R_cov)
+            if st_name != 'GNSS':
+                self._last_independent_position = self.ekf.x[0:3].copy()
             
         return True
 
@@ -186,6 +442,23 @@ class SensorSentry:
         """
         t = command.timestamp
         cur_pos = self.get_current_position()
+
+        # -1. If return-to-start override is active under high-frequency attack, strictly reject new destinations
+        if self._return_to_start_override or self.hf_detector.is_override_active():
+            stop_sig = self.safe_stop.trigger_safe_stop(
+                t, "HIGH_FREQ_CYBER_ATTACK", "New destination rejected: Return-to-start override active under cyber attack"
+            )
+            self.bus.send(stop_sig.to_bytes(), 'BRAKE')
+            return False
+
+        # 0. Check if destination shift aligns with active directional spoof vector
+        target_shift = command.destination[:2] - cur_pos[:2]
+        if self.directional_detector.is_direction_aligned('GNSS', target_shift):
+            stop_sig = self.safe_stop.trigger_safe_stop(
+                t, "DIRECTIONAL_SPOOF", "Directional Spoof Destination Hijack Detected"
+            )
+            self.bus.send(stop_sig.to_bytes(), 'BRAKE')
+            return False
         
         # 1. Cryptographic Command Validator
         cmd_sig = self.cmd_validator.validate(command, cur_pos, t)

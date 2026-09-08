@@ -42,7 +42,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "filterpy-master"))
 
-from decision_making import ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus
+from decision_making import (
+    ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus,
+    HighFrequencyAttackDetector, HighFrequencySignal,
+)
 from decision_making.cusum_monitor import DriftStatus
 from ekf_fusion import MultiSensorEKF, SensorType
 from ekf_fusion.sensor_models import (
@@ -232,6 +235,7 @@ class InteractiveSpoofDemo:
         self.route_progress_at_spoof = 0.0
         self.rejoin_progress = 0.0
         self.spoof_count = 0
+        self.spoof_timestamps: List[float] = []
         self.phase = "READY"
         self.mission_started = False
         self.spoof_active = False
@@ -264,6 +268,17 @@ class InteractiveSpoofDemo:
             auto_recover_after=0,
         )
         self.ml_monitor = LSTMAutoEncoderMonitor(alarm_threshold=220.0, warning_threshold=90.0)
+        self.hf_detector = HighFrequencyAttackDetector(
+            freq_threshold_hz=1.5,
+            burst_window_s=4.0,
+            burst_count_threshold=2,
+            drift_override_threshold_m=4.0,
+        )
+        self.hf_detector.set_start_position(START)
+        self.override_to_start = False
+        self.overall_drift = np.zeros(2)
+        self.negative_drift = np.zeros(2)
+        self._hf_logged = False
         # Sensor noise covariance matrices
         self._gnss_R = gnss_default_R(sigma_pos=1.5, sigma_alt=2.5, sigma_vel=0.1)
         self._imu_R = imu_default_R(sigma_gyro=0.005, sigma_accel=0.05)
@@ -351,6 +366,16 @@ class InteractiveSpoofDemo:
         self._last_spoof_target = target.copy()
         self._last_spoof_time = self.time_s
         self.spoof_count += 1
+        self.spoof_timestamps.append(self.time_s)
+
+        recent_spoofs = [t for t in self.spoof_timestamps if (self.time_s - t) <= 5.0]
+        if len(recent_spoofs) > 5:
+            self.override_to_start = True
+            self._add_event(
+                "HIGH-FREQ CYBER HIJACK CONFIRMED (>5 spoofing in 5s): "
+                "Destination OVERRIDDEN with STARTING POINT! Returning directly to start.",
+                RED,
+            )
 
         # If vehicle is currently in NOMINAL, reset CUSUM/detectors for the new attack profile
         if self.phase == "NOMINAL":
@@ -404,6 +429,11 @@ class InteractiveSpoofDemo:
             return
         if self.phase == "COMPLETE":
             self._add_event("MISSION COMPLETE: Destination reached. Re-launch mission to test again.", YELLOW)
+            self.render()
+            self.fig.canvas.draw_idle()
+            return
+        if self.override_to_start:
+            self._add_event("OVERRIDE LOCKED: Returning to START location under continuous cyber attack. New destinations rejected!", YELLOW)
             self.render()
             self.fig.canvas.draw_idle()
             return
@@ -546,12 +576,13 @@ class InteractiveSpoofDemo:
         return signal.verdict.name == "ACCEPTED"
 
     def _make_recovery_route(self) -> List[np.ndarray]:
-        """Return a server-approved corridor to rejoin the original planned route.
+        """Return a recovery corridor back to START (if under attack override) or rejoin path."""
+        if self.override_to_start or self.hf_detector.is_override_active():
+            # Stop drift and return directly to START location using negative drift trajectory
+            overall_drift = self.position - START
+            mid_safe = self.position - 0.5 * overall_drift
+            return [self.position.copy(), mid_safe, START.copy()]
 
-        The route goes to a rejoin point ON the planned path (not directly
-        to the destination). After reaching it the drone resumes nominal
-        route-following and can be spoofed again.
-        """
         route = self.selected_route
         route_vector = DESTINATION - START
         route_length_sq = float(np.dot(route_vector, route_vector))
@@ -597,8 +628,16 @@ class InteractiveSpoofDemo:
             if np.linalg.norm(self.position - target) < 0.15:
                 self.recovery_index += 1
                 if self.recovery_index >= len(self.recovery_route) - 1:
-                    # Reached the rejoin point on the planned route
-                    self._rejoin_nominal()
+                    if self.override_to_start or self.hf_detector.is_override_active():
+                        self.position = START.copy()
+                        self.phase = "COMPLETE"
+                        self._add_event(
+                            f"SAFE AT START LOCATION: Return-to-launch completed under continuous attack override. "
+                            f"Drift canceled. Survived {self.spoof_count} attacks.", GREEN,
+                        )
+                    else:
+                        # Reached the rejoin point on the planned route
+                        self._rejoin_nominal()
 
     def _rejoin_nominal(self) -> None:
         """Transition from recovery back to nominal route-following.
@@ -719,12 +758,37 @@ class InteractiveSpoofDemo:
                 f"LSTM-AE ML WARNING: Sequence reconstruction loss MSE={self.ml_mse:.1f} (thresh={self.ml_monitor.alarm_threshold:.0f}).",
                 ORANGE,
             )
-        # Quarantines on CUSUM alarm OR ML alarm
-        if self.phase == "NOMINAL" and self.spoof_active and (slow_signal.status == DriftStatus.ALARM or ml_signal.status == MLStatus.ALARM):
+
+        # 9. Evaluate High-Frequency Cyber Attacks & Negative Drift
+        hf_signal = self.hf_detector.record_and_evaluate(
+            "GNSS", self.time_s, y, self.position, is_attack_sample=self.spoof_active
+        )
+        self.overall_drift = hf_signal.overall_drift_vector
+        self.negative_drift = hf_signal.negative_drift_vector
+
+        recent_spoofs = [t for t in self.spoof_timestamps if (self.time_s - t) <= 5.0]
+        if hf_signal.override_to_start or len(recent_spoofs) > 5:
+            self.override_to_start = True
+            if not self._hf_logged:
+                self._hf_logged = True
+                self._add_event(
+                    f"HIGH-FREQ CYBER ATTACK ({hf_signal.attack_frequency_hz:.1f}Hz, pattern={hf_signal.attack_pattern.name}): "
+                    f"Destination OVERRIDDEN with STARTING POINT. Negative drift ({np.linalg.norm(self.negative_drift):.1f}m) canceling attack. Drone returning to START.",
+                    RED,
+                )
+
+        # Quarantines on CUSUM alarm OR ML alarm OR High-Frequency Override
+        if self.phase == "NOMINAL" and self.spoof_active and (
+            slow_signal.status == DriftStatus.ALARM
+            or ml_signal.status == MLStatus.ALARM
+            or self.override_to_start
+        ):
             self.phase = "QUARANTINED"
             self.detection_time = self.time_s
             self.bus.send(b"GPS_QUARANTINED", "SAARM")
-            trigger_src = "CUSUM + LSTM-AE" if (slow_signal.status == DriftStatus.ALARM and ml_signal.status == MLStatus.ALARM) else ("LSTM-AE ML" if ml_signal.status == MLStatus.ALARM else "CUSUM")
+            trigger_src = "HIGH-FREQ OVERRIDE" if self.override_to_start else (
+                "CUSUM + LSTM-AE" if (slow_signal.status == DriftStatus.ALARM and ml_signal.status == MLStatus.ALARM) else ("LSTM-AE ML" if ml_signal.status == MLStatus.ALARM else "CUSUM")
+            )
             self._add_event(
                 f"ANOMALY CONFIRMED ({trigger_src}): Persistent GNSS drift confirmed. "
                 "SAARM isolates GNSS; drone holds on EKF fusion of IMU+Camera+LiDAR.",

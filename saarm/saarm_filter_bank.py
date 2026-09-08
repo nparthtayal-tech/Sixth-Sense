@@ -316,7 +316,7 @@ class SaarmFilterBank:
                 dead_reckoning_active=self.dr_navigator.active,
                 dr_position=self.dr_navigator.position if self.dr_navigator.active else None
             )
-        
+
         # Enough alarms — run isolation diagnostic
         residual_full = self._mean_residual_full()
         residual_without_sensor = self._mean_residual_excluding(sensor_name)
@@ -364,6 +364,43 @@ class SaarmFilterBank:
                 dead_reckoning_active=self.dr_navigator.active,
                 dr_position=self.dr_navigator.position if self.dr_navigator.active else None
             )
+
+    def force_isolate(self,
+                      sensor_name: str,
+                      timestamp: float,
+                      ekf_state: np.ndarray,
+                      ekf_heading: float,
+                      ekf_speed: float) -> SaarmSignal:
+        """Immediately quarantine a sensor after an independently confirmed attack.
+
+        ``process_alarm`` intentionally waits for several generic alarms to
+        avoid reacting to noisy measurements.  Call this method only when an
+        independent detector (such as the directional-vector monitor) has
+        already supplied that confirmation.
+        """
+        self._quarantined.add(sensor_name)
+        self._alarm_counts[sensor_name] = max(
+            self._alarm_counts.get(sensor_name, 0), self.min_alarm_count
+        )
+        self.active_filter = f"EXCLUDE_{sensor_name}"
+
+        if sensor_name == "GNSS" and not self.dr_navigator.active:
+            self.dr_navigator.activate(ekf_state[0:3], ekf_heading, ekf_speed)
+
+        residual_full = self._mean_residual_full()
+        residual_without_sensor = self._mean_residual_excluding(sensor_name)
+        verdict = SaarmVerdict.DEAD_RECKONING if self.dr_navigator.active else SaarmVerdict.ISOLATED
+        return SaarmSignal(
+            timestamp=timestamp,
+            verdict=verdict,
+            quarantined_sensors=list(self._quarantined),
+            active_filter=self.active_filter,
+            residual_full=residual_full,
+            residual_exclusion=residual_without_sensor,
+            confidence=1.0,
+            dead_reckoning_active=self.dr_navigator.active,
+            dr_position=self.dr_navigator.position if self.dr_navigator.active else None,
+        )
     
     def clear_alarm(self, sensor_name: str):
         """Reset alarm counter when a sensor returns to healthy."""
