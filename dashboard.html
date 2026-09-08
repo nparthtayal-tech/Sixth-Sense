@@ -1,0 +1,1650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SensorSentry — Spoofing Detection & Sensor Fusion</title>
+    <meta name="description" content="PS 18: Intelligent sensor-fusion system that cross-validates sensor data to detect GPS spoofing, false readings, or manipulated environmental data.">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #060a13;
+            --bg-secondary: #0c1220;
+            --bg-card: rgba(12, 18, 35, 0.85);
+            --border: rgba(255, 255, 255, 0.06);
+            --border-active: rgba(0, 212, 255, 0.25);
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #475569;
+            --cyan: #00d4ff;
+            --cyan-dim: rgba(0, 212, 255, 0.15);
+            --green: #00e676;
+            --green-dim: rgba(0, 230, 118, 0.15);
+            --red: #ff3b3b;
+            --red-dim: rgba(255, 59, 59, 0.15);
+            --orange: #ff9100;
+            --orange-dim: rgba(255, 145, 0, 0.15);
+            --purple: #7b61ff;
+            --yellow: #ffd600;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        body::before {
+            content: '';
+            position: fixed; inset: 0;
+            background-image:
+                linear-gradient(rgba(0, 212, 255, 0.012) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 212, 255, 0.012) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none; z-index: 0;
+        }
+        .app { position: relative; z-index: 1; padding: 16px 24px 40px; max-width: 1600px; margin: 0 auto; }
+
+        /* ===== HEADER ===== */
+        .header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 12px 0 18px; border-bottom: 1px solid var(--border); margin-bottom: 18px;
+        }
+        .header-left { display: flex; align-items: center; gap: 14px; }
+        .logo-icon {
+            width: 34px; height: 34px; border-radius: 10px;
+            background: linear-gradient(135deg, var(--cyan), var(--purple));
+            display: flex; align-items: center; justify-content: center;
+            font-size: 16px; box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+        }
+        .logo {
+            font-size: 20px; font-weight: 800; letter-spacing: 2px;
+            background: linear-gradient(135deg, var(--cyan), var(--purple));
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        .subtitle { font-size: 10px; color: var(--text-muted); letter-spacing: 2.5px; text-transform: uppercase; }
+        .header-right { display: flex; align-items: center; gap: 16px; }
+        .conn-badge {
+            display: flex; align-items: center; gap: 8px;
+            padding: 5px 12px; border-radius: 20px;
+            font-size: 11px; font-weight: 600; letter-spacing: 1px; transition: all 0.4s ease;
+        }
+        .conn-badge.disconnected { background: rgba(71,85,105,0.3); border: 1px solid rgba(71,85,105,0.4); color: var(--text-muted); }
+        .conn-badge.connected { background: var(--green-dim); border: 1px solid rgba(0,230,118,0.3); color: var(--green); }
+        .conn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); transition: all 0.4s; }
+        .conn-badge.connected .conn-dot { background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse-dot 2s ease-in-out infinite; }
+        @keyframes pulse-dot { 0%,100% { box-shadow: 0 0 4px var(--green); } 50% { box-shadow: 0 0 12px var(--green); } }
+        .packet-counter { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); }
+
+        /* ===== STATUS BAR ===== */
+        .status-bar { display: grid; grid-template-columns: 1fr 1fr 1fr 1.8fr; gap: 12px; margin-bottom: 16px; }
+        .status-card {
+            background: var(--bg-card); backdrop-filter: blur(20px);
+            border: 1px solid var(--border); border-radius: 12px; padding: 16px; transition: all 0.4s ease;
+        }
+        .status-label { font-size: 9px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px; }
+        .status-value { font-size: 15px; font-weight: 700; display: flex; align-items: center; gap: 8px; transition: all 0.3s; }
+        .status-value .icon { font-size: 18px; }
+        .threat-secure .status-value { color: var(--green); }
+        .threat-secure { border-color: rgba(0,230,118,0.15); background: linear-gradient(135deg, var(--bg-card), rgba(0,230,118,0.05)); }
+        .threat-detected .status-value { color: var(--red); }
+        .threat-detected { border-color: rgba(255,59,59,0.3); background: linear-gradient(135deg, var(--bg-card), rgba(255,59,59,0.08)); animation: threat-pulse 1.5s ease-in-out infinite; }
+        @keyframes threat-pulse { 0%,100% { border-color: rgba(255,59,59,0.2); } 50% { border-color: rgba(255,59,59,0.5); box-shadow: 0 0 30px rgba(255,59,59,0.1); } }
+        .threat-waiting .status-value { color: var(--text-muted); }
+        .nav-fused .status-value { color: var(--cyan); }
+        .nav-fused { border-color: rgba(0,212,255,0.15); }
+        .nav-inertial .status-value { color: var(--orange); }
+        .nav-inertial { border-color: rgba(255,145,0,0.2); background: linear-gradient(135deg, var(--bg-card), rgba(255,145,0,0.05)); }
+
+        /* Attack Controls */
+        .attack-card { display: flex; flex-direction: column; gap: 6px; justify-content: center; }
+        .attack-btn, .imu-attack-btn {
+            width: 100%; padding: 10px 14px; border: none; border-radius: 8px;
+            font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 700;
+            letter-spacing: 1.5px; text-transform: uppercase; cursor: pointer; transition: all 0.3s;
+        }
+        .attack-btn.activate { background: linear-gradient(135deg, #cc0000, #ff3b3b); color: white; box-shadow: 0 4px 16px rgba(255,59,59,0.3); }
+        .attack-btn.activate:hover { box-shadow: 0 4px 24px rgba(255,59,59,0.5); transform: translateY(-1px); }
+        .attack-btn.deactivate { background: linear-gradient(135deg, #1a1a2e, #2a2a4e); color: var(--text-secondary); border: 1px solid rgba(255,59,59,0.3); }
+        .imu-attack-btn.activate { background: linear-gradient(135deg, #7b2ff7, #a855f7); color: white; box-shadow: 0 4px 16px rgba(123,47,247,0.3); }
+        .imu-attack-btn.activate:hover { box-shadow: 0 4px 24px rgba(123,47,247,0.5); transform: translateY(-1px); }
+        .imu-attack-btn.deactivate { background: linear-gradient(135deg, #1a1a2e, #2a2a4e); color: var(--text-secondary); border: 1px solid rgba(123,47,247,0.3); }
+        .reset-btn {
+            width: 100%; padding: 6px; border: 1px solid var(--border); border-radius: 6px;
+            background: transparent; color: var(--text-muted); font-family: 'Inter', sans-serif;
+            font-size: 10px; font-weight: 500; cursor: pointer; letter-spacing: 1px; transition: all 0.3s;
+        }
+        .reset-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+
+        /* ===== TRUST GAUGES ===== */
+        .trust-section { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+        .trust-card {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+            padding: 16px; display: flex; flex-direction: column; align-items: center; transition: all 0.4s;
+        }
+        .trust-card:hover { border-color: var(--border-active); }
+        .gauge-wrap { position: relative; width: 90px; height: 90px; margin-bottom: 8px; }
+        .gauge-svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+        .gauge-bg { fill: none; stroke: rgba(255,255,255,0.05); stroke-width: 6; }
+        .gauge-fill { fill: none; stroke-width: 6; stroke-linecap: round; transition: stroke-dashoffset 0.6s ease, stroke 0.4s ease; }
+        .gauge-text {
+            position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+            font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 700;
+        }
+        .trust-label { font-size: 10px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--text-muted); }
+
+        /* Cross-Validation Indicators */
+        .xval-row {
+            display: flex; align-items: center; gap: 6px; margin-top: 8px;
+            font-size: 10px; color: var(--text-muted); font-weight: 500;
+        }
+        .xval-dot { width: 6px; height: 6px; border-radius: 50%; transition: all 0.3s; }
+        .xval-dot.ok { background: var(--green); box-shadow: 0 0 4px var(--green); }
+        .xval-dot.fail { background: var(--red); box-shadow: 0 0 4px var(--red); }
+
+        /* ===== MAIN CONTENT ===== */
+        .main-content { display: grid; grid-template-columns: 1fr 300px; gap: 12px; margin-bottom: 16px; }
+        .card {
+            background: var(--bg-card); backdrop-filter: blur(20px);
+            border: 1px solid var(--border); border-radius: 12px; padding: 16px; transition: border-color 0.3s;
+        }
+        .card:hover { border-color: var(--border-active); }
+        .card-title {
+            font-size: 11px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase;
+            color: var(--text-secondary); margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+        }
+        .badge {
+            font-size: 8px; padding: 2px 7px; border-radius: 10px;
+            background: var(--cyan-dim); color: var(--cyan); font-weight: 700; letter-spacing: 1px;
+            animation: badge-pulse 2s ease-in-out infinite;
+        }
+        @keyframes badge-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+        /* Trajectory Canvas */
+        .trajectory-container { position: relative; }
+        #trajectoryCanvas { width: 100%; height: 280px; border-radius: 8px; background: #050810; border: 1px solid var(--border); }
+        .trajectory-legend { display: flex; gap: 20px; margin-top: 10px; justify-content: center; }
+        .legend-item { display: flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 500; color: var(--text-secondary); }
+        .legend-dot { width: 8px; height: 8px; border-radius: 50%; }
+        .legend-dot.true { background: var(--green); box-shadow: 0 0 4px var(--green); }
+        .legend-dot.hacked { background: var(--red); box-shadow: 0 0 4px var(--red); }
+        .legend-dot.fused { background: var(--cyan); box-shadow: 0 0 4px var(--cyan); }
+
+        .disconnected-overlay {
+            position: absolute; inset: 0; background: rgba(6,10,19,0.85); border-radius: 8px;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            z-index: 10; transition: opacity 0.5s;
+        }
+        .disconnected-overlay.hidden { opacity: 0; pointer-events: none; }
+        .disconnected-icon { font-size: 36px; margin-bottom: 10px; animation: float 3s ease-in-out infinite; }
+        @keyframes float { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+        .disconnected-text { font-size: 13px; font-weight: 600; color: var(--text-muted); letter-spacing: 2px; }
+
+        /* Sensor Panel */
+        .sensor-panel { display: flex; flex-direction: column; gap: 10px; }
+        .sensor-group-title {
+            font-size: 10px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase;
+            color: var(--text-muted); margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+        }
+        .sensor-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .sensor-axis { font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700; width: 14px; text-align: center; }
+        .sensor-axis.x { color: var(--red); } .sensor-axis.y { color: var(--green); } .sensor-axis.z { color: var(--cyan); }
+        .sensor-bar-wrap { flex: 1; height: 5px; background: rgba(255,255,255,0.05); border-radius: 3px; overflow: hidden; }
+        .sensor-bar { height: 100%; border-radius: 3px; transition: width 0.15s ease-out; min-width: 2px; }
+        .sensor-bar.x { background: linear-gradient(90deg, var(--red), rgba(255,59,59,0.4)); }
+        .sensor-bar.y { background: linear-gradient(90deg, var(--green), rgba(0,230,118,0.4)); }
+        .sensor-bar.z { background: linear-gradient(90deg, var(--cyan), rgba(0,212,255,0.4)); }
+        .sensor-val { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--text-secondary); width: 60px; text-align: right; }
+
+        .algo-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+        .algo-stat { background: rgba(255,255,255,0.02); border-radius: 6px; padding: 8px; text-align: center; }
+        .algo-stat-label { font-size: 8px; font-weight: 600; letter-spacing: 1.5px; color: var(--text-muted); text-transform: uppercase; }
+        .algo-stat-value { font-family: 'JetBrains Mono', monospace; font-size: 16px; font-weight: 700; margin-top: 2px; }
+        .algo-stat-value.safe { color: var(--green); } .algo-stat-value.warning { color: var(--orange); } .algo-stat-value.danger { color: var(--red); }
+
+        /* ===== CHARTS + THREAT LOG ===== */
+        .bottom-section { display: grid; grid-template-columns: 1fr 1fr 1fr 1.2fr; gap: 12px; margin-bottom: 16px; }
+        .chart-card canvas { width: 100% !important; height: 160px !important; }
+        .threshold-info {
+            font-size: 9px; color: var(--text-muted); margin-top: 6px;
+            font-family: 'JetBrains Mono', monospace; display: flex; align-items: center; gap: 5px;
+        }
+        .threshold-line { width: 14px; height: 2px; background: var(--orange); border-radius: 1px; }
+
+        /* ===== ANALYSIS ROW (Velocity + FFT) ===== */
+        .analysis-section { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+        .analysis-section canvas { width: 100% !important; height: 180px !important; }
+        .vel-legend { display: flex; gap: 16px; margin-top: 8px; justify-content: center; }
+        .vel-legend-item { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-secondary); }
+        .vel-legend-dot { width: 8px; height: 3px; border-radius: 2px; }
+        .vel-legend-dot.vx { background: var(--red); } .vel-legend-dot.vy { background: var(--green); } .vel-legend-dot.vz { background: var(--cyan); }
+
+        /* Threat Log */
+        .threat-log { max-height: 220px; overflow-y: auto; }
+        .threat-log::-webkit-scrollbar { width: 4px; }
+        .threat-log::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+        .log-entry {
+            display: flex; align-items: flex-start; gap: 8px; padding: 6px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.03); font-size: 11px; animation: logSlideIn 0.3s ease;
+        }
+        @keyframes logSlideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+        .log-time { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-muted); white-space: nowrap; min-width: 40px; }
+        .log-badge {
+            font-size: 8px; font-weight: 700; letter-spacing: 1px; padding: 2px 6px;
+            border-radius: 4px; white-space: nowrap;
+        }
+        .log-badge.critical { background: var(--red-dim); color: var(--red); }
+        .log-badge.warning { background: var(--orange-dim); color: var(--orange); }
+        .log-badge.info { background: var(--cyan-dim); color: var(--cyan); }
+        .log-msg { color: var(--text-secondary); flex: 1; }
+        .log-empty { color: var(--text-muted); font-size: 11px; text-align: center; padding: 30px 0; }
+
+        /* ===== EXPLANATION ===== */
+        .explanation {
+            background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px;
+            padding: 16px 22px;
+        }
+        .explanation h3 { font-size: 11px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--cyan); margin-bottom: 8px; }
+        .explanation p { font-size: 12px; color: var(--text-secondary); line-height: 1.6; }
+        .highlight { color: var(--cyan); font-weight: 600; }
+        .danger-hl { color: var(--red); font-weight: 600; }
+        .success-hl { color: var(--green); font-weight: 600; }
+
+        /* ===== OPS GRID (Corridor Guard + Hacker Console) ===== */
+        .ops-grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 12px; margin-bottom: 16px; }
+        .corridor-card {
+            background: linear-gradient(135deg, var(--bg-card), rgba(0, 212, 255, 0.03));
+            transition: all 0.4s ease; border-color: rgba(0, 212, 255, 0.15);
+        }
+        .corridor-card.breached {
+            border-color: rgba(255, 59, 59, 0.7) !important;
+            background: linear-gradient(135deg, rgba(255, 59, 59, 0.14), var(--bg-card)) !important;
+            box-shadow: 0 0 35px rgba(255, 59, 59, 0.25);
+            animation: corridor-flash 1.2s ease-in-out infinite;
+        }
+        @keyframes corridor-flash { 0%,100% { border-color: rgba(255,59,59,0.4); } 50% { border-color: rgba(255,59,59,0.9); } }
+        .corridor-metrics-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+        .corridor-stat { background: rgba(255,255,255,0.02); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; text-align: center; }
+        .cs-label { font-size: 8px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); }
+        .cs-val { font-family: 'JetBrains Mono', monospace; font-size: 15px; font-weight: 700; margin: 3px 0 1px; }
+        .cs-val.safe { color: var(--green); } .cs-val.warning { color: var(--orange); } .cs-val.danger { color: var(--red); }
+        .cs-sub { font-size: 8px; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+        .corridor-alert-box {
+            background: rgba(255, 59, 59, 0.15); border: 1px solid rgba(255, 59, 59, 0.4); border-radius: 8px;
+            padding: 9px 12px; margin-bottom: 10px; display: flex; align-items: center; gap: 10px;
+        }
+        .corridor-alert-box.hidden { display: none; }
+        .corridor-alert-box .alert-icon { font-size: 22px; animation: alert-shake 0.5s ease infinite; }
+        @keyframes alert-shake { 0%,100% { transform: rotate(0); } 25% { transform: rotate(-8deg); } 75% { transform: rotate(8deg); } }
+        .corridor-alert-box strong { font-size: 11px; color: var(--red); display: block; letter-spacing: 0.5px; }
+        .corridor-alert-box p { font-size: 10px; color: #cbd5e1; margin-top: 2px; line-height: 1.35; }
+        .corridor-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+        .corridor-recenter-btn {
+            background: rgba(0, 212, 255, 0.1); border: 1px solid rgba(0, 212, 255, 0.3); color: var(--cyan);
+            border-radius: 6px; padding: 6px 12px; font-size: 10px; font-weight: 600; cursor: pointer; transition: all 0.2s;
+        }
+        .corridor-recenter-btn:hover { background: rgba(0, 212, 255, 0.25); transform: translateY(-1px); }
+        .corridor-hint { font-size: 9px; color: var(--text-muted); font-style: italic; }
+
+        .hacker-card {
+            background: linear-gradient(135deg, var(--bg-card), rgba(255, 59, 59, 0.04));
+            border-color: rgba(255, 59, 59, 0.25);
+        }
+        .hacker-target-display {
+            background: rgba(255, 59, 59, 0.08); border: 1px solid rgba(255, 59, 59, 0.25); border-radius: 6px;
+            padding: 6px 10px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;
+            font-size: 10px;
+        }
+        .ht-label { color: var(--text-muted); font-weight: 500; }
+        .ht-val { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: #ff6b6b; }
+        .hacker-presets { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 8px; }
+        .hacker-preset {
+            background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px;
+            padding: 6px 8px; font-size: 9.5px; font-weight: 600; color: var(--text-secondary); cursor: pointer; transition: all 0.2s;
+            text-align: left;
+        }
+        .hacker-preset:hover { background: rgba(255, 59, 59, 0.12); border-color: rgba(255, 59, 59, 0.35); color: #ff6b6b; }
+        .hacker-preset.active { background: rgba(255, 59, 59, 0.22); border-color: rgba(255, 59, 59, 0.6); color: #ff4d4d; }
+        .hacker-custom-row { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--text-muted); margin-bottom: 6px; }
+        .hacker-custom-row input[type="range"] { flex: 1; accent-color: var(--red); height: 5px; cursor: pointer; }
+        .hacker-hint { font-size: 8.5px; color: var(--text-muted); }
+
+        /* ===== TACTICAL 2D ARENA & PHASE BANNER ===== */
+        .map-view-toggle { display: flex; gap: 4px; background: rgba(255,255,255,0.03); border: 1px solid var(--border); border-radius: 6px; padding: 2px; }
+        .view-toggle-btn {
+            background: transparent; border: none; color: var(--text-muted); font-size: 9.5px; font-weight: 600;
+            padding: 4px 10px; border-radius: 4px; cursor: pointer; transition: all 0.2s;
+        }
+        .view-toggle-btn:hover { color: var(--text-primary); }
+        .view-toggle-btn.active { background: var(--cyan-dim); color: var(--cyan); box-shadow: 0 0 10px rgba(0,212,255,0.2); }
+
+        .mission-phase-banner {
+            margin-bottom: 8px; text-align: center;
+        }
+        .phase-pill {
+            display: inline-block; padding: 6px 14px; border-radius: 20px; font-size: 11px; font-weight: 700;
+            letter-spacing: 1px; text-transform: uppercase; transition: all 0.3s;
+        }
+        .phase-pill.ready { background: rgba(96,165,250,0.18); border: 1px solid #60a5fa; color: #60a5fa; }
+        .phase-pill.nominal { background: rgba(34,197,94,0.18); border: 1px solid #22c55e; color: #22c55e; }
+        .phase-pill.spoofed { background: rgba(251,146,60,0.18); border: 1px solid #fb923c; color: #fb923c; animation: pulse-orange 1.2s infinite; }
+        .phase-pill.quarantined { background: rgba(250,204,21,0.18); border: 1px solid #facc15; color: #facc15; animation: pulse-yellow 1.2s infinite; }
+        .phase-pill.server { background: rgba(34,211,238,0.18); border: 1px solid #22d3ee; color: #22d3ee; }
+        .phase-pill.recovering { background: rgba(96,165,250,0.22); border: 1px solid #60a5fa; color: #60a5fa; }
+        .phase-pill.complete { background: rgba(34,197,94,0.25); border: 1px solid #22c55e; color: #22c55e; }
+        .phase-pill.breach { background: rgba(255,59,59,0.25); border: 1px solid #ff3b3b; color: #ff3b3b; animation: corridor-flash 0.8s infinite; }
+
+        @keyframes pulse-orange { 0%,100% { box-shadow: 0 0 5px rgba(251,146,60,0.3); } 50% { box-shadow: 0 0 15px rgba(251,146,60,0.7); } }
+        @keyframes pulse-yellow { 0%,100% { box-shadow: 0 0 5px rgba(250,204,21,0.3); } 50% { box-shadow: 0 0 15px rgba(250,204,21,0.7); } }
+
+        .mission-controls-bar {
+            display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap;
+        }
+        .sim-ctrl-btn {
+            padding: 6px 12px; border-radius: 6px; font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 700;
+            letter-spacing: 0.5px; cursor: pointer; border: 1px solid transparent; transition: all 0.2s;
+        }
+        .sim-ctrl-btn.launch { background: #1d4ed8; color: white; }
+        .sim-ctrl-btn.launch:hover { background: #2563eb; }
+        .sim-ctrl-btn.pause { background: #334155; color: white; border-color: #475569; }
+        .sim-ctrl-btn.pause:hover { background: #475569; }
+        .sim-ctrl-btn.replay { background: #0f766e; color: white; }
+        .sim-ctrl-btn.replay:hover { background: #0d9488; }
+        .sim-ctrl-btn.calib { background: #7c3aed; color: white; }
+        .sim-ctrl-btn.calib:hover { background: #9333ea; }
+        .sim-hint-text { font-size: 9px; color: var(--text-muted); margin-left: auto; font-style: italic; }
+
+        @media (max-width: 1100px) {
+            .status-bar, .trust-section, .ops-grid { grid-template-columns: 1fr 1fr; }
+            .main-content, .bottom-section { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+
+    <!-- HEADER -->
+    <header class="header">
+        <div class="header-left">
+            <div class="logo-icon">◆</div>
+            <div>
+                <div class="logo">SENSORSENTRY</div>
+                <div class="subtitle">Spoofing Detection & Sensor Fusion — PS 18</div>
+            </div>
+        </div>
+        <div class="header-right">
+            <span class="packet-counter" id="packetCounter">0 packets</span>
+            <div class="conn-badge disconnected" id="connBadge">
+                <span class="conn-dot"></span>
+                <span id="connText">DISCONNECTED</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- STATUS BAR -->
+    <section class="status-bar">
+        <div class="status-card threat-waiting" id="threatCard">
+            <div class="status-label">Threat Status</div>
+            <div class="status-value" id="threatValue"><span class="icon">⏳</span><span>WAITING</span></div>
+        </div>
+        <div class="status-card" id="navCard">
+            <div class="status-label">Navigation Source</div>
+            <div class="status-value" id="navValue"><span class="icon">📡</span><span>—</span></div>
+        </div>
+        <div class="status-card" id="imuCard">
+            <div class="status-label">IMU Sensor (Phone)</div>
+            <div class="status-value" id="imuValue"><span class="icon">📱</span><span>OFFLINE</span></div>
+        </div>
+        <div class="status-card attack-card">
+            <div class="status-label">Attack Simulation Panel</div>
+            <button class="attack-btn activate" id="attackBtn">⚡ GPS Spoofing</button>
+            <button class="imu-attack-btn activate" id="imuAttackBtn">🔧 IMU Injection</button>
+            <button class="reset-btn" id="resetBtn">↺ Reset Simulation</button>
+        </div>
+    </section>
+
+    <!-- TRUST GAUGES (Cross-Validation) -->
+    <section class="trust-section">
+        <div class="trust-card" id="gpsTrustCard">
+            <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 100 100">
+                    <circle class="gauge-bg" cx="50" cy="50" r="42"/>
+                    <circle class="gauge-fill" id="gpsTrustGauge" cx="50" cy="50" r="42" stroke="var(--green)"
+                        stroke-dasharray="263.9" stroke-dashoffset="0"/>
+                </svg>
+                <div class="gauge-text" id="gpsTrustText" style="color:var(--green)">100%</div>
+            </div>
+            <div class="trust-label">GPS Trust</div>
+            <div class="xval-row"><div class="xval-dot ok" id="xvalGpsImu"></div><span>GPS ↔ IMU</span></div>
+        </div>
+        <div class="trust-card" id="imuTrustCard">
+            <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 100 100">
+                    <circle class="gauge-bg" cx="50" cy="50" r="42"/>
+                    <circle class="gauge-fill" id="imuTrustGauge" cx="50" cy="50" r="42" stroke="var(--green)"
+                        stroke-dasharray="263.9" stroke-dashoffset="0"/>
+                </svg>
+                <div class="gauge-text" id="imuTrustText" style="color:var(--green)">100%</div>
+            </div>
+            <div class="trust-label">IMU Trust</div>
+            <div class="xval-row"><div class="xval-dot ok" id="xvalImuAnomaly"></div><span>Anomaly Check</span></div>
+        </div>
+        <div class="trust-card" id="envTrustCard">
+            <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 100 100">
+                    <circle class="gauge-bg" cx="50" cy="50" r="42"/>
+                    <circle class="gauge-fill" id="envTrustGauge" cx="50" cy="50" r="42" stroke="var(--green)"
+                        stroke-dasharray="263.9" stroke-dashoffset="0"/>
+                </svg>
+                <div class="gauge-text" id="envTrustText" style="color:var(--green)">100%</div>
+            </div>
+            <div class="trust-label">Environmental</div>
+            <div class="xval-row"><div class="xval-dot ok" id="xvalBaroGps"></div><span>Baro ↔ GPS Alt</span></div>
+        </div>
+        <div class="trust-card" id="sysTrustCard">
+            <div class="gauge-wrap">
+                <svg class="gauge-svg" viewBox="0 0 100 100">
+                    <circle class="gauge-bg" cx="50" cy="50" r="42"/>
+                    <circle class="gauge-fill" id="sysTrustGauge" cx="50" cy="50" r="42" stroke="var(--green)"
+                        stroke-dasharray="263.9" stroke-dashoffset="0"/>
+                </svg>
+                <div class="gauge-text" id="sysTrustText" style="color:var(--green)">100%</div>
+            </div>
+            <div class="trust-label">System Integrity</div>
+            <div class="xval-row"><div class="xval-dot ok" id="xvalSystem"></div><span>All Sensors Fused</span></div>
+        </div>
+    </section>
+
+    <!-- MISSION SECURITY & HACKER SPOOF CONSOLE -->
+    <section class="ops-grid">
+        <!-- LEFT: FLIGHT CORRIDOR & HIJACK GUARD -->
+        <div class="card corridor-card" id="corridorCard">
+            <div class="card-title">
+                <span id="corridorIcon">🛡️</span>
+                <span>Flight Corridor & Mission Envelope Guard</span>
+                <span class="badge" id="corridorBadge" style="background:var(--green-dim);color:var(--green)">ENVELOPE OK</span>
+            </div>
+            <div class="corridor-body">
+                <div class="corridor-metrics-row">
+                    <div class="corridor-stat">
+                        <div class="cs-label">Lateral Drift (Ay)</div>
+                        <div class="cs-val safe" id="csLateralVal">+0.00 m</div>
+                        <div class="cs-sub">Corridor: ±1.80m</div>
+                    </div>
+                    <div class="corridor-stat">
+                        <div class="cs-label">Physical Heading (Gz)</div>
+                        <div class="cs-val safe" id="csHeadingVal">0.0°</div>
+                        <div class="cs-sub">Allowed: 0° ±10°</div>
+                    </div>
+                    <div class="corridor-stat">
+                        <div class="cs-label">Trajectory Memory</div>
+                        <div class="cs-val safe" id="csEnvelopeVal">AUTHORIZED</div>
+                        <div class="cs-sub">Mission Flight Plan</div>
+                    </div>
+                </div>
+                <div class="corridor-alert-box hidden" id="corridorAlertBox">
+                    <div class="alert-icon">🚨</div>
+                    <div class="alert-content">
+                        <strong>WRONG PATH / HIJACK ATTEMPT DETECTED!</strong>
+                        <p>Physical phone motion is steering toward unauthorized coordinates. Sensor history confirms this path was NEVER authorized by Fleet Command! SAARM locking navigation.</p>
+                    </div>
+                </div>
+                <div class="corridor-actions">
+                    <button class="corridor-recenter-btn" id="recenterBtn">🎯 Re-Center / Calibrate Phone</button>
+                    <span class="corridor-hint">Tilt or slide phone sideways to simulate steering toward hacker's trap!</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT: MALICIOUS HACKER SPOOF CONSOLE -->
+        <div class="card hacker-card">
+            <div class="card-title" style="color:#ff5555">
+                <span>☠️</span>
+                <span>Malicious Hacker Spoof Console</span>
+                <span class="badge" style="background:var(--red-dim);color:var(--red)">ATTACKER</span>
+            </div>
+            <div class="hacker-body">
+                <div class="hacker-target-display">
+                    <span class="ht-label">Active Spoof Target:</span>
+                    <span class="ht-val" id="hackerTargetDisplay">Mountain Ambush (+15.0m)</span>
+                </div>
+                <div class="hacker-presets">
+                    <button class="hacker-preset active" data-y="15" data-label="Mountain Ambush (+15m)">🏔️ Ambush (+15m)</button>
+                    <button class="hacker-preset" data-y="-20" data-label="Hostile Base (-20m)">🏢 Base (-20m)</button>
+                    <button class="hacker-preset" data-y="35" data-label="No-Fly Zone (+35m)">🚫 No-Fly (+35m)</button>
+                    <button class="hacker-preset" data-y="-35" data-label="Forest Trap (-35m)">🌲 Trap (-35m)</button>
+                </div>
+                <div class="hacker-custom-row">
+                    <label>Target Offset:</label>
+                    <input type="range" id="hackerYRange" min="-45" max="45" value="15" step="1">
+                    <span id="hackerYRangeVal" style="font-family:'JetBrains Mono',monospace;font-size:11px;min-width:38px;color:var(--red)">+15m</span>
+                </div>
+                <div class="hacker-hint">💡 <em>Click anywhere on the Trajectory Map to place the Hacker Target crosshair!</em></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- MAIN CONTENT -->
+    <section class="main-content">
+        <div class="card" style="display: flex; flex-direction: column;">
+            <div class="card-title" style="justify-content: space-between; margin-bottom: 8px;">
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <span id="arenaIcon">🎯</span>
+                    <span id="arenaTitle">Tactical Mission Arena (demo_animated_sentry)</span>
+                    <span class="badge" id="liveBadge">LIVE HIL</span>
+                </div>
+                <div class="map-view-toggle">
+                    <button class="view-toggle-btn active" id="btnView2D">2D Arena (Map)</button>
+                    <button class="view-toggle-btn" id="btnView1D">1D Deviation</button>
+                </div>
+            </div>
+
+            <!-- Phase Banner -->
+            <div class="mission-phase-banner" id="phaseBannerWrap">
+                <div class="phase-pill nominal" id="phasePill">PHASE 1 • NOMINAL FLIGHT — CLICK MAP TO SET FAKE GPS TARGET</div>
+            </div>
+
+            <div class="trajectory-container" style="flex: 1;">
+                <canvas id="trajectoryCanvas"></canvas>
+                <div class="disconnected-overlay" id="trajOverlay">
+                    <div class="disconnected-icon">📡</div>
+                    <div class="disconnected-text">WAITING FOR PHONE IMU</div>
+                </div>
+            </div>
+
+            <!-- Mission Controls Toolbar -->
+            <div class="mission-controls-bar">
+                <button class="sim-ctrl-btn launch" id="btnSimLaunch">▶ Launch Mission</button>
+                <button class="sim-ctrl-btn pause" id="btnSimPause">⏸ Pause [Space]</button>
+                <button class="sim-ctrl-btn replay" id="btnSimReplay">↺ Replay Attack [R]</button>
+                <button class="sim-ctrl-btn calib" id="btnSimCalib">🎯 Zero Phone [C]</button>
+                <span class="sim-hint-text">💡 Click map to inject fake GPS target • Space: Pause • R: Replay • C: Zero Phone</span>
+            </div>
+
+            <div class="trajectory-legend" id="arenaLegend">
+                <div class="legend-item"><div class="legend-dot" style="background:#ff9100;box-shadow:0 0 4px #ff9100"></div> Drone (True)</div>
+                <div class="legend-item"><div class="legend-dot hacked"></div> Raw GNSS (Untrusted)</div>
+                <div class="legend-item"><div class="legend-dot fused"></div> Trusted Fusion</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#c084fc;box-shadow:0 0 4px #c084fc"></div> Phone IMU (HIL)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:rgba(0,230,118,0.4);border:1px dashed var(--green)"></div> Corridor (±6m)</div>
+                <div class="legend-item"><div class="legend-dot" style="background:#00d4ff;border-radius:2px"></div> HMAC Rejoin Route</div>
+                <div class="legend-item"><div class="legend-dot" style="background:var(--red);border-radius:2px"></div> Attacker Target</div>
+            </div>
+        </div>
+
+        <div class="card sensor-panel">
+            <div class="card-title">Live Sensor Data</div>
+            <div class="sensor-group">
+                <div class="sensor-group-title">Accelerometer (m/s²)</div>
+                <div class="sensor-row"><span class="sensor-axis x">X</span><div class="sensor-bar-wrap"><div class="sensor-bar x" id="bar-ax"></div></div><span class="sensor-val" id="val-ax">0.000</span></div>
+                <div class="sensor-row"><span class="sensor-axis y">Y</span><div class="sensor-bar-wrap"><div class="sensor-bar y" id="bar-ay"></div></div><span class="sensor-val" id="val-ay">0.000</span></div>
+                <div class="sensor-row"><span class="sensor-axis z">Z</span><div class="sensor-bar-wrap"><div class="sensor-bar z" id="bar-az"></div></div><span class="sensor-val" id="val-az">0.000</span></div>
+            </div>
+            <div class="sensor-group">
+                <div class="sensor-group-title">Gyroscope (rad/s)</div>
+                <div class="sensor-row"><span class="sensor-axis x">X</span><div class="sensor-bar-wrap"><div class="sensor-bar x" id="bar-gx"></div></div><span class="sensor-val" id="val-gx">0.000</span></div>
+                <div class="sensor-row"><span class="sensor-axis y">Y</span><div class="sensor-bar-wrap"><div class="sensor-bar y" id="bar-gy"></div></div><span class="sensor-val" id="val-gy">0.000</span></div>
+                <div class="sensor-row"><span class="sensor-axis z">Z</span><div class="sensor-bar-wrap"><div class="sensor-bar z" id="bar-gz"></div></div><span class="sensor-val" id="val-gz">0.000</span></div>
+            </div>
+            <div class="sensor-group">
+                <div class="sensor-group-title">Environmental Cross-Check</div>
+                <div class="sensor-row"><span class="sensor-axis" style="color:var(--orange);width:auto;font-size:10px">BARO</span><span class="sensor-val" id="val-baro" style="flex:1;text-align:left;margin-left:4px">100.0 m</span></div>
+                <div class="sensor-row"><span class="sensor-axis" style="color:var(--purple);width:auto;font-size:10px">GPS↕</span><span class="sensor-val" id="val-gpsalt" style="flex:1;text-align:left;margin-left:4px">100.0 m</span></div>
+            </div>
+            <div class="algo-stats">
+                <div class="algo-stat"><div class="algo-stat-label">Chi² Gate</div><div class="algo-stat-value safe" id="chi2Val">0.00</div></div>
+                <div class="algo-stat"><div class="algo-stat-label">CUSUM</div><div class="algo-stat-value safe" id="cusumVal">0.00</div></div>
+                <div class="algo-stat"><div class="algo-stat-label">EKF Residual</div><div class="algo-stat-value safe" id="residualVal">0.00</div></div>
+                <div class="algo-stat"><div class="algo-stat-label">Sim Time</div><div class="algo-stat-value" id="simTimeVal" style="color:var(--text-secondary)">0.0s</div></div>
+            </div>
+        </div>
+    </section>
+
+    <!-- CHARTS + THREAT LOG -->
+    <section class="bottom-section">
+        <div class="card chart-card">
+            <div class="card-title">EKF Residual</div>
+            <canvas id="residualChart"></canvas>
+        </div>
+        <div class="card chart-card">
+            <div class="card-title">Chi-Squared Gate (χ²)</div>
+            <canvas id="chiChart"></canvas>
+            <div class="threshold-info"><div class="threshold-line"></div> Threshold: 5.991</div>
+        </div>
+        <div class="card chart-card">
+            <div class="card-title">CUSUM Drift</div>
+            <canvas id="cusumChart"></canvas>
+            <div class="threshold-info"><div class="threshold-line"></div> Threshold: 20.0</div>
+        </div>
+        <div class="card">
+            <div class="card-title">🛡️ Threat Log <span class="badge">REAL-TIME</span></div>
+            <div class="threat-log" id="threatLog">
+                <div class="log-empty">No events yet — start the simulation</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- VELOCITY + FFT ANALYSIS -->
+    <section class="analysis-section">
+        <div class="card chart-card">
+            <div class="card-title">Velocity (Integrated from Accelerometer) <span class="badge">XYZ</span></div>
+            <canvas id="velocityChart"></canvas>
+            <div class="vel-legend">
+                <div class="vel-legend-item"><div class="vel-legend-dot vx"></div> Vx</div>
+                <div class="vel-legend-item"><div class="vel-legend-dot vy"></div> Vy</div>
+                <div class="vel-legend-item"><div class="vel-legend-dot vz"></div> Vz</div>
+            </div>
+        </div>
+        <div class="card chart-card">
+            <div class="card-title">Frequency Spectrum — Octave Analysis (Accel Z) <span class="badge">FFT</span></div>
+            <canvas id="fftChart"></canvas>
+            <div class="threshold-info">Anomalous frequency peaks may indicate injection attacks</div>
+        </div>
+    </section>
+
+    <!-- EXPLANATION -->
+    <section class="explanation">
+        <h3>◆ PS 18 — SensorSentry: How Cross-Validation Works</h3>
+        <p>
+            The system <span class="highlight">cross-validates multiple sensor sources</span> in real-time:
+            <strong>GPS ↔ IMU</strong> (via EKF innovation consistency / Chi² gate),
+            <strong>Barometer ↔ GPS Altitude</strong> (environmental cross-check), and
+            <strong>IMU Anomaly Detection</strong> (bounds checking for false/injected readings).
+            Each sensor receives a <span class="highlight">Trust Score</span> (0–100%) based on cross-validation results.
+            When <span class="danger-hl">GPS spoofing</span>, <span class="danger-hl">IMU injection</span>, or <span class="danger-hl">environmental manipulation</span> is detected,
+            the SAARM module <span class="success-hl">automatically isolates compromised sensors</span> and switches to safe inertial-only navigation.
+        </p>
+    </section>
+
+</div>
+
+<script>
+// ========================================================================
+const CONFIG = { maxDataPoints: 150, chi2Threshold: 5.991, cusumThreshold: 20.0, sensorBarMaxAccel: 12.0, sensorBarMaxGyro: 5.0 };
+const socket = io();
+const trajData = { trueY: [], hackedY: [], fusedY: [], phoneY: [] };
+const CIRCUMFERENCE = 2 * Math.PI * 42; // ~263.9
+let hackerTargetY = 15.0;
+let hackerTargetLabel = "Mountain Ambush (+15m)";
+let corridorHalfWidth = 1.8;
+
+// ========================================================================
+// Charts
+// ========================================================================
+const chartDefaults = {
+    responsive: true, maintainAspectRatio: false, animation: false,
+    interaction: { mode: 'nearest', intersect: false },
+    scales: {
+        x: { display: false },
+        y: { grid: { color: 'rgba(255,255,255,0.04)', drawBorder: false }, ticks: { color: '#475569', font: { family: "'JetBrains Mono', monospace", size: 9 } }, border: { display: false } }
+    },
+    plugins: { legend: { display: false }, tooltip: { enabled: false } }
+};
+function createChart(id, color, extras = []) {
+    const ctx = document.getElementById(id).getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, 160);
+    g.addColorStop(0, color.replace(')', ',0.2)').replace('rgb', 'rgba'));
+    g.addColorStop(1, color.replace(')', ',0.0)').replace('rgb', 'rgba'));
+    return new Chart(ctx, { type: 'line', data: { labels: [], datasets: [{ data: [], borderColor: color, backgroundColor: g, fill: true, tension: 0.4, pointRadius: 0, borderWidth: 2 }, ...extras] }, options: JSON.parse(JSON.stringify(chartDefaults)) });
+}
+function thresholdDS(val, color) { return { data: [], borderColor: color, borderDash: [6,4], borderWidth: 1.5, pointRadius: 0, fill: false, tension: 0 }; }
+
+const residualChart = createChart('residualChart', 'rgb(0,212,255)');
+const chiChart = createChart('chiChart', 'rgb(123,97,255)', [thresholdDS(CONFIG.chi2Threshold, '#ff9100')]);
+const cusumChart = createChart('cusumChart', 'rgb(255,59,59)', [thresholdDS(CONFIG.cusumThreshold, '#ff9100')]);
+
+// Velocity chart (3 lines)
+const velCtx = document.getElementById('velocityChart').getContext('2d');
+const velocityChart = new Chart(velCtx, {
+    type: 'line',
+    data: {
+        labels: [],
+        datasets: [
+            { label: 'Vx', data: [], borderColor: '#ff3b3b', backgroundColor: 'transparent', tension: 0.4, pointRadius: 0, borderWidth: 1.5 },
+            { label: 'Vy', data: [], borderColor: '#00e676', backgroundColor: 'transparent', tension: 0.4, pointRadius: 0, borderWidth: 1.5 },
+            { label: 'Vz', data: [], borderColor: '#00d4ff', backgroundColor: 'transparent', tension: 0.4, pointRadius: 0, borderWidth: 1.5 },
+        ]
+    },
+    options: JSON.parse(JSON.stringify(chartDefaults))
+});
+
+// FFT Bar chart
+const fftCtx = document.getElementById('fftChart').getContext('2d');
+const fftChart = new Chart(fftCtx, {
+    type: 'bar',
+    data: {
+        labels: [],
+        datasets: [{
+            label: 'Magnitude',
+            data: [],
+            backgroundColor: 'rgba(123, 97, 255, 0.6)',
+            borderColor: 'rgba(123, 97, 255, 1)',
+            borderWidth: 1,
+            borderRadius: 3,
+        }]
+    },
+    options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        scales: {
+            x: { grid: { display: false }, ticks: { color: '#475569', font: { family: "'JetBrains Mono', monospace", size: 8 }, maxRotation: 0 }, border: { display: false } },
+            y: { grid: { color: 'rgba(255,255,255,0.04)', drawBorder: false }, ticks: { color: '#475569', font: { family: "'JetBrains Mono', monospace", size: 9 } }, border: { display: false } }
+        },
+        plugins: { legend: { display: false }, tooltip: { enabled: false } }
+    }
+});
+
+function addChartData(chart, value, extras = []) {
+    chart.data.labels.push('');
+    chart.data.datasets[0].data.push(value);
+    extras.forEach((v, i) => { if (chart.data.datasets[i+1]) chart.data.datasets[i+1].data.push(v); });
+    if (chart.data.labels.length > CONFIG.maxDataPoints) { chart.data.labels.shift(); chart.data.datasets.forEach(ds => ds.data.shift()); }
+    chart.update('none');
+}
+
+// ========================================================================
+// 2D Tactical Mission Arena & 1D Deviation Engine
+// ========================================================================
+let currentViewMode = '2D'; // '2D' or '1D'
+const ARENA = {
+    start: [15.0, 15.0],
+    dest: [150.0, 125.0],
+    corridorW: 6.0,
+    landmarks: [[30, 105], [46, 93], [107, 55], [127, 77], [137, 111], [83, 119]],
+    maxEast: 175.0,
+    maxNorth: 185.0,
+    duration: 60.0
+};
+const routeVec = [ARENA.dest[0] - ARENA.start[0], ARENA.dest[1] - ARENA.start[1]];
+const routeDist = Math.hypot(routeVec[0], routeVec[1]);
+const routeUnit = [routeVec[0] / routeDist, routeVec[1] / routeDist];
+const perpUnit = [-routeUnit[1], routeUnit[0]]; // Perpendicular normal [-0.6316, 0.7752]
+
+const PHASE_STYLES = {
+    'READY': { label: 'READY • LAUNCH THE MISSION, THEN CLICK MAP TO INJECT SPOOF', cls: 'ready' },
+    'NOMINAL': { label: 'PHASE 1 • NOMINAL FLIGHT — CLICK MAP TO SET FAKE GPS TARGET', cls: 'nominal' },
+    'SPOOFED': { label: 'PHASE 2 • GPS SPOOF ACTIVE — DRONE IS BEING DIVERTED', cls: 'spoofed' },
+    'QUARANTINED': { label: 'PHASE 3 • SPOOF CONFIRMED — GNSS QUARANTINED, SAFE HOVER', cls: 'quarantined' },
+    'SERVER_VERIFYING': { label: 'PHASE 4 • ENCRYPTED SERVER RECONNECT IN PROGRESS', cls: 'server' },
+    'RECOVERING': { label: 'PHASE 5 • FOLLOWING HMAC-SIGNED REJOIN ROUTE', cls: 'recovering' },
+    'FINAL_LEG': { label: 'PHASE 6 • BACK ON THE AUTHORISED MISSION', cls: 'nominal' },
+    'COMPLETE': { label: 'COMPLETE • AUTHORISED DESTINATION REACHED', cls: 'complete' }
+};
+
+let sim = {
+    started: true,
+    paused: false,
+    phase: 'NOMINAL',
+    time: 0.0,
+    pos: [15.0, 15.0],
+    gps: [15.0, 15.0],
+    trusted: [15.0, 15.0],
+    phoneLatDrift: 0.0,
+    phoneHeading: 0.0,
+    phoneBreached: false,
+    spoofTarget: null,
+    spoofStartTime: null,
+    lastSpoofTarget: null,
+    lastSpoofTime: null,
+    scheduledReplay: null,
+    detectionTime: null,
+    serverAuthTime: null,
+    recoveryRoute: [],
+    recoveryIndex: 0,
+    trails: {
+        physical: [],
+        gps: [],
+        trusted: []
+    }
+};
+
+const trajCanvas = document.getElementById('trajectoryCanvas');
+const trajCtx = trajCanvas.getContext('2d');
+function resizeCanvas() {
+    const r = trajCanvas.parentElement.getBoundingClientRect();
+    trajCanvas.width = r.width;
+    trajCanvas.height = currentViewMode === '2D' ? 360 : 280;
+}
+resizeCanvas(); window.addEventListener('resize', resizeCanvas);
+
+function setPhase(p) {
+    sim.phase = p;
+    updatePhaseBanner();
+}
+
+function updatePhaseBanner() {
+    const pill = document.getElementById('phasePill');
+    if (!pill) return;
+    if (sim.phoneBreached) {
+        pill.textContent = 'CORRIDOR BREACH • PHONE STEERING OFF-COURSE / HIJACK DETECTED';
+        pill.className = 'phase-pill breach';
+        return;
+    }
+    const style = PHASE_STYLES[sim.phase] || PHASE_STYLES['NOMINAL'];
+    pill.textContent = style.label;
+    pill.className = 'phase-pill ' + style.cls;
+}
+
+function injectMissionSpoof(target, fromReplay = false) {
+    if (!sim.started || sim.phase !== 'NOMINAL') return false;
+    sim.spoofTarget = [target[0], target[1]];
+    sim.spoofStartTime = sim.time;
+    sim.lastSpoofTarget = [target[0], target[1]];
+    sim.lastSpoofTime = sim.time;
+    setPhase('SPOOFED');
+    socket.emit('toggle_spoofing');
+    return true;
+}
+
+function makeRecoveryRoute(pos, target) {
+    const rV = [ARENA.dest[0] - ARENA.start[0], ARENA.dest[1] - ARENA.start[1]];
+    const rLenSq = rV[0]*rV[0] + rV[1]*rV[1];
+    const prog = ((pos[0] - ARENA.start[0])*rV[0] + (pos[1] - ARENA.start[1])*rV[1]) / rLenSq;
+    const rejoinProg = Math.max(0.55, Math.min(0.86, Math.max(prog + 0.30, 0.55)));
+    const rejoin = [ARENA.start[0] + rejoinProg * rV[0], ARENA.start[1] + rejoinProg * rV[1]];
+    let laneDir = 1.0;
+    if (target) {
+        const perpDot = (target[0] - pos[0]) * perpUnit[0] + (target[1] - pos[1]) * perpUnit[1];
+        laneDir = -Math.sign(perpDot) || 1.0;
+    }
+    const safeLane = [
+        pos[0] + 0.48 * (rejoin[0] - pos[0]) + laneDir * 10.0 * perpUnit[0],
+        pos[1] + 0.48 * (rejoin[1] - pos[1]) + laneDir * 10.0 * perpUnit[1]
+    ];
+    return [[pos[0], pos[1]], safeLane, rejoin, [...ARENA.dest]];
+}
+
+function advanceMission(dt = 0.20) {
+    if (!sim.started || sim.paused || sim.phase === 'COMPLETE') return;
+    sim.time = Math.round((sim.time + dt) * 100) / 100;
+    
+    // Check scheduled replay
+    if (sim.scheduledReplay && sim.phase === 'NOMINAL' && sim.time >= sim.scheduledReplay.time) {
+        injectMissionSpoof(sim.scheduledReplay.target, true);
+        sim.scheduledReplay = null;
+    }
+
+    // Advance motion
+    if (sim.phase === 'NOMINAL') {
+        const progress = Math.min(1.0, sim.time / ARENA.duration);
+        sim.pos = [
+            ARENA.start[0] + progress * (ARENA.dest[0] - ARENA.start[0]),
+            ARENA.start[1] + progress * (ARENA.dest[1] - ARENA.start[1])
+        ];
+        if (sim.time >= ARENA.duration) {
+            sim.pos = [...ARENA.dest];
+            setPhase('COMPLETE');
+        }
+    } else if (sim.phase === 'SPOOFED') {
+        if (sim.spoofTarget) {
+            const dx = sim.spoofTarget[0] - sim.pos[0], dy = sim.spoofTarget[1] - sim.pos[1];
+            const dist = Math.hypot(dx, dy);
+            if (dist > 1e-4) {
+                const step = Math.min(5.4 * dt, dist);
+                sim.pos[0] += (dx / dist) * step;
+                sim.pos[1] += (dy / dist) * step;
+            }
+        }
+    } else if (sim.phase === 'QUARANTINED' || sim.phase === 'SERVER_VERIFYING') {
+        // Safe hover
+    } else if (sim.phase === 'RECOVERING') {
+        if (sim.recoveryRoute.length > sim.recoveryIndex + 1) {
+            const tgt = sim.recoveryRoute[sim.recoveryIndex + 1];
+            const dx = tgt[0] - sim.pos[0], dy = tgt[1] - sim.pos[1];
+            const dist = Math.hypot(dx, dy);
+            if (dist < 0.35) {
+                sim.recoveryIndex++;
+                if (sim.recoveryIndex >= sim.recoveryRoute.length - 1) {
+                    setPhase('FINAL_LEG');
+                }
+            } else {
+                const step = Math.min(6.5 * dt, dist);
+                sim.pos[0] += (dx / dist) * step;
+                sim.pos[1] += (dy / dist) * step;
+            }
+        }
+    } else if (sim.phase === 'FINAL_LEG') {
+        const dx = ARENA.dest[0] - sim.pos[0], dy = ARENA.dest[1] - sim.pos[1];
+        const dist = Math.hypot(dx, dy);
+        if (dist < 0.35) {
+            sim.pos = [...ARENA.dest];
+            setPhase('COMPLETE');
+        } else {
+            const step = Math.min(5.3 * dt, dist);
+            sim.pos[0] += (dx / dist) * step;
+            sim.pos[1] += (dy / dist) * step;
+        }
+    }
+
+    // Evaluate sensors & detectors
+    const t = sim.time;
+    const imuWitness = [sim.pos[0] + 0.55 * Math.sin(1.4*t), sim.pos[1] + 0.42 * Math.cos(1.1*t)];
+    const camWitness = [sim.pos[0] + 0.24 * Math.cos(0.8*t), sim.pos[1] + 0.20 * Math.sin(1.7*t)];
+    const lidarWitness = [sim.pos[0] + 0.18 * Math.sin(1.9*t), sim.pos[1] - 0.16 * Math.cos(1.3*t)];
+    sim.trusted = [
+        0.25 * imuWitness[0] + 0.45 * camWitness[0] + 0.30 * lidarWitness[0],
+        0.25 * imuWitness[1] + 0.45 * camWitness[1] + 0.30 * lidarWitness[1]
+    ];
+
+    if (sim.phase === 'NOMINAL') {
+        sim.gps = [sim.pos[0] + 0.8 * Math.sin(0.7*t), sim.pos[1] + 0.7 * Math.cos(0.9*t)];
+    } else if (sim.phase === 'SPOOFED') {
+        const nominal = [
+            ARENA.start[0] + (sim.time / ARENA.duration) * (ARENA.dest[0] - ARENA.start[0]),
+            ARENA.start[1] + (sim.time / ARENA.duration) * (ARENA.dest[1] - ARENA.start[1])
+        ];
+        const elapsed = sim.time - sim.spoofStartTime;
+        const dx = sim.spoofTarget[0] - nominal[0], dy = sim.spoofTarget[1] - nominal[1];
+        const dist = Math.hypot(dx, dy);
+        if (dist > 1e-4) {
+            const drift = Math.min(dist * 0.9, 1.5 * elapsed * elapsed);
+            sim.gps = [nominal[0] + (dx / dist) * drift, nominal[1] + (dy / dist) * drift];
+        }
+        
+        if (elapsed > 2.8 && !sim.detectionTime) {
+            sim.detectionTime = sim.time;
+            setPhase('QUARANTINED');
+        }
+    }
+
+    if (sim.detectionTime) {
+        const sinceDet = sim.time - sim.detectionTime;
+        if (sim.phase === 'QUARANTINED' && sinceDet >= 1.2) {
+            setPhase('SERVER_VERIFYING');
+        }
+        if (sim.phase === 'SERVER_VERIFYING' && sinceDet >= 3.6) {
+            sim.serverAuthTime = sim.time;
+            sim.recoveryRoute = makeRecoveryRoute(sim.pos, sim.spoofTarget);
+            sim.recoveryIndex = 0;
+            setPhase('RECOVERING');
+        }
+    }
+
+    sim.trails.physical.push([...sim.pos]);
+    sim.trails.gps.push([...sim.gps]);
+    sim.trails.trusted.push([...sim.trusted]);
+    if (sim.trails.physical.length > 150) {
+        sim.trails.physical.shift();
+        sim.trails.gps.shift();
+        sim.trails.trusted.shift();
+    }
+}
+
+function drawTactical2DArena(ctx, W, H) {
+    const pad = { top: 25, bottom: 25, left: 45, right: 20 };
+    const pW = W - pad.left - pad.right;
+    const pH = H - pad.top - pad.bottom;
+    ctx.fillStyle = '#050810';
+    ctx.fillRect(0, 0, W, H);
+
+    const toX = e => pad.left + (e / ARENA.maxEast) * pW;
+    const toY = n => pad.top + ((ARENA.maxNorth - n) / ARENA.maxNorth) * pH;
+
+    // Grid lines & coordinate numbers (every 25m)
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#475569';
+    ctx.font = "9px 'JetBrains Mono', monospace";
+    for (let e = 0; e <= ARENA.maxEast; e += 25) {
+        const x = toX(e);
+        ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, H - pad.bottom); ctx.stroke();
+        ctx.textAlign = 'center';
+        ctx.fillText(e + 'm', x, H - pad.bottom + 14);
+    }
+    for (let n = 0; n <= ARENA.maxNorth; n += 25) {
+        const y = toY(n);
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+        ctx.textAlign = 'right';
+        ctx.fillText(n + 'm', pad.left - 6, y + 3);
+    }
+    ctx.fillText("North", pad.left - 6, pad.top - 8);
+    ctx.textAlign = 'left';
+    ctx.fillText("East →", W - pad.right - 25, H - pad.bottom + 14);
+
+    // 1. Authorized Corridor Envelope Band (±6m)
+    const sx = ARENA.start[0], sy = ARENA.start[1];
+    const dx = ARENA.dest[0], dy = ARENA.dest[1];
+    const cw = ARENA.corridorW;
+    const c1 = [sx + cw * perpUnit[0], sy + cw * perpUnit[1]];
+    const c2 = [dx + cw * perpUnit[0], dy + cw * perpUnit[1]];
+    const c3 = [dx - cw * perpUnit[0], dy - cw * perpUnit[1]];
+    const c4 = [sx - cw * perpUnit[0], sy - cw * perpUnit[1]];
+
+    ctx.fillStyle = 'rgba(0, 230, 118, 0.07)';
+    ctx.beginPath();
+    ctx.moveTo(toX(c1[0]), toY(c1[1]));
+    ctx.lineTo(toX(c2[0]), toY(c2[1]));
+    ctx.lineTo(toX(c3[0]), toY(c3[1]));
+    ctx.lineTo(toX(c4[0]), toY(c4[1]));
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(0, 230, 118, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(toX(c1[0]), toY(c1[1])); ctx.lineTo(toX(c2[0]), toY(c2[1])); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(toX(c4[0]), toY(c4[1])); ctx.lineTo(toX(c3[0]), toY(c3[1])); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 2. Authorised mission route (dashed green)
+    ctx.strokeStyle = '#22c55e';
+    ctx.lineWidth = 2.0;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(toX(sx), toY(sy));
+    ctx.lineTo(toX(dx), toY(dy));
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 3. Camera / LiDAR landmarks
+    ARENA.landmarks.forEach((pt, idx) => {
+        const lx = toX(pt[0]), ly = toY(pt[1]);
+        ctx.fillStyle = 'rgba(148, 163, 184, 0.4)';
+        ctx.fillRect(lx - 4, ly - 4, 8, 8);
+        ctx.fillStyle = '#64748b';
+        ctx.font = "8px 'Inter', sans-serif";
+        ctx.textAlign = 'center';
+        ctx.fillText(`LM${idx+1}`, lx, ly - 6);
+    });
+
+    // 4. Server HMAC Rejoin Route (cyan dash-dot)
+    if (sim.recoveryRoute && sim.recoveryRoute.length > 1) {
+        ctx.strokeStyle = '#22d3ee';
+        ctx.lineWidth = 2.4;
+        ctx.setLineDash([8, 3, 2, 3]);
+        ctx.beginPath();
+        sim.recoveryRoute.forEach((pt, i) => {
+            const rx = toX(pt[0]), ry = toY(pt[1]);
+            i === 0 ? ctx.moveTo(rx, ry) : ctx.lineTo(rx, ry);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    // 5. Trails
+    function drawTrail(pts, color, dash = []) {
+        if (!pts || pts.length < 2) return;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.8;
+        ctx.setLineDash(dash);
+        ctx.beginPath();
+        pts.forEach((p, i) => {
+            const x = toX(p[0]), y = toY(p[1]);
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    drawTrail(sim.trails.physical, 'rgba(251, 146, 60, 0.9)'); // Orange true path
+    drawTrail(sim.trails.trusted, 'rgba(96, 165, 250, 0.7)');   // Blue trusted fusion
+    drawTrail(sim.trails.gps, 'rgba(251, 113, 133, 0.8)', [4, 4]); // Red dotted GPS
+
+    // 6. START Point
+    const stX = toX(sx), stY = toY(sy);
+    ctx.fillStyle = '#22c55e';
+    ctx.beginPath();
+    ctx.moveTo(stX, stY - 8); ctx.lineTo(stX + 7, stY + 6); ctx.lineTo(stX - 7, stY + 6); ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#22c55e';
+    ctx.font = "bold 9px 'Inter', sans-serif";
+    ctx.textAlign = 'left';
+    ctx.fillText("START", stX + 9, stY + 4);
+
+    // 7. AUTHORISED DESTINATION Point (Star)
+    const dstX = toX(dx), dstY = toY(dy);
+    ctx.fillStyle = '#22c55e';
+    ctx.beginPath();
+    for (let i = 0; i < 5; i++) {
+        ctx.lineTo(dstX + Math.cos((18 + i * 72) * Math.PI / 180) * 11, dstY - Math.sin((18 + i * 72) * Math.PI / 180) * 11);
+        ctx.lineTo(dstX + Math.cos((54 + i * 72) * Math.PI / 180) * 5, dstY - Math.sin((54 + i * 72) * Math.PI / 180) * 5);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = '#22c55e';
+    ctx.font = "bold 9px 'Inter', sans-serif";
+    ctx.fillText("DESTINATION", dstX + 14, dstY + 3);
+
+    // 8. Spoofed Target Marker (if active)
+    if (sim.spoofTarget) {
+        const spX = toX(sim.spoofTarget[0]), spY = toY(sim.spoofTarget[1]);
+        const pulseR = 12 + (Date.now() % 1500) / 100;
+        ctx.strokeStyle = 'rgba(255, 59, 59, 0.4)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(spX, spY, pulseR, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 59, 59, 0.12)';
+        ctx.beginPath(); ctx.arc(spX, spY, 18, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#ff3b3b';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(spX - 7, spY - 7); ctx.lineTo(spX + 7, spY + 7);
+        ctx.moveTo(spX + 7, spY - 7); ctx.lineTo(spX - 7, spY + 7);
+        ctx.stroke();
+        ctx.fillStyle = '#ff6b6b';
+        ctx.font = "bold 9px 'JetBrains Mono', monospace";
+        ctx.textAlign = 'center';
+        ctx.fillText(`SPOOF TARGET [${sim.spoofTarget[0].toFixed(0)}, ${sim.spoofTarget[1].toFixed(0)}]`, spX, spY - 14);
+    }
+
+    // 9. Current Positions:
+    // Raw GNSS (Red X)
+    const gx = toX(sim.gps[0]), gy = toY(sim.gps[1]);
+    ctx.strokeStyle = '#fb7185';
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(gx - 5, gy - 5); ctx.lineTo(gx + 5, gy + 5);
+    ctx.moveTo(gx + 5, gy - 5); ctx.lineTo(gx - 5, gy + 5);
+    ctx.stroke();
+
+    // Trusted Fusion (Blue Dot)
+    const tx = toX(sim.trusted[0]), ty = toY(sim.trusted[1]);
+    ctx.fillStyle = '#60a5fa';
+    ctx.beginPath(); ctx.arc(tx, ty, 4, 0, Math.PI * 2); ctx.fill();
+
+    // Phone IMU Hardware-in-the-Loop (Purple Diamond)
+    const phoneX = sim.pos[0] + sim.phoneLatDrift * perpUnit[0];
+    const phoneY = sim.pos[1] + sim.phoneLatDrift * perpUnit[1];
+    const px = toX(phoneX), py = toY(phoneY);
+    ctx.save();
+    ctx.shadowColor = '#c084fc';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = '#c084fc';
+    ctx.beginPath();
+    ctx.moveTo(px, py - 6); ctx.lineTo(px + 6, py); ctx.lineTo(px, py + 6); ctx.lineTo(px - 6, py); ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+
+    // Drone Icon (Orange Hexagon with heading)
+    const drX = toX(sim.pos[0]), drY = toY(sim.pos[1]);
+    ctx.save();
+    ctx.shadowColor = '#fb923c';
+    ctx.shadowBlur = 14;
+    ctx.fillStyle = '#fb923c';
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+        const a = (i * 60) * Math.PI / 180;
+        const hx = drX + 7 * Math.cos(a), hy = drY + 7 * Math.sin(a);
+        i === 0 ? ctx.moveTo(hx, hy) : ctx.lineTo(hx, hy);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+}
+
+function draw1DDeviation(ctx, W, H) {
+    const pad = { top: 25, bottom: 25, left: 45, right: 15 };
+    ctx.fillStyle = '#050810'; ctx.fillRect(0, 0, W, H);
+    const n = trajData.trueY.length; if (n < 2) return;
+    const allY = [...trajData.trueY, ...trajData.hackedY, ...trajData.fusedY, ...(trajData.phoneY || []), hackerTargetY, -corridorHalfWidth - 1, corridorHalfWidth + 1];
+    let minY = Math.min(...allY), maxY = Math.max(...allY);
+    const yr = maxY - minY || 1; minY -= yr * 0.12; maxY += yr * 0.12;
+    const pW = W - pad.left - pad.right, pH = H - pad.top - pad.bottom;
+    
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)'; ctx.lineWidth = 1;
+    for (let i = 0; i <= 5; i++) { const gy = pad.top + (pH/5)*i; ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(W-pad.right, gy); ctx.stroke(); }
+    ctx.fillStyle = '#475569'; ctx.font = "9px 'JetBrains Mono',monospace"; ctx.textAlign = 'right';
+    for (let i = 0; i <= 5; i++) { const gy = pad.top + (pH/5)*i; ctx.fillText((maxY - ((maxY-minY)/5)*i).toFixed(1) + 'm', pad.left-6, gy+3); }
+    
+    const toX = i => pad.left + (i/(n-1))*pW;
+    const toY = v => pad.top + ((maxY-v)/(maxY-minY))*pH;
+
+    const cTop = toY(corridorHalfWidth), cBottom = toY(-corridorHalfWidth);
+    ctx.fillStyle = 'rgba(0, 230, 118, 0.07)';
+    ctx.fillRect(pad.left, Math.min(cTop, cBottom), pW, Math.abs(cBottom - cTop));
+    ctx.strokeStyle = 'rgba(0, 230, 118, 0.35)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(pad.left, cTop); ctx.lineTo(W - pad.right, cTop); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(pad.left, cBottom); ctx.lineTo(W - pad.right, cBottom); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(0, 230, 118, 0.6)'; ctx.font = "8px 'JetBrains Mono', monospace"; ctx.textAlign = 'left';
+    ctx.fillText('AUTHORIZED CORRIDOR (±1.8m)', pad.left + 8, Math.max(cTop, cBottom) - 4);
+
+    const hY = toY(hackerTargetY);
+    ctx.strokeStyle = 'rgba(255, 59, 59, 0.6)'; ctx.lineWidth = 1.2; ctx.setLineDash([6, 3]);
+    ctx.beginPath(); ctx.moveTo(pad.left, hY); ctx.lineTo(W - pad.right, hY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ff6b6b'; ctx.font = "bold 9px 'JetBrains Mono', monospace"; ctx.textAlign = 'right';
+    ctx.fillText(`🎯 SPOOF DESTINATION: ${hackerTargetLabel}`, W - pad.right - 8, hY - 4);
+
+    function drawP(data, color, glow, w=2) {
+        if (!data || data.length < 2) return;
+        ctx.save(); ctx.shadowColor = glow; ctx.shadowBlur = 10; ctx.strokeStyle = color; ctx.lineWidth = w; ctx.lineJoin = 'round';
+        ctx.beginPath(); data.forEach((v,i) => { const x=toX(i),y=toY(v); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); }); ctx.stroke(); ctx.restore();
+    }
+    drawP(trajData.hackedY, '#ff3b3b', 'rgba(255,59,59,0.4)', 1.5);
+    drawP(trajData.trueY, '#00e676', 'rgba(0,230,118,0.4)', 2);
+    drawP(trajData.fusedY, '#00d4ff', 'rgba(0,212,255,0.5)', 2.5);
+    drawP(trajData.phoneY, '#c084fc', 'rgba(192,132,252,0.6)', 2.0);
+
+    function drawDot(data, color, glow) {
+        if (!data || !data.length) return; const x=toX(data.length-1), y=toY(data[data.length-1]);
+        ctx.save(); ctx.shadowColor=glow; ctx.shadowBlur=14; ctx.fillStyle=color; ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill(); ctx.restore();
+        ctx.fillStyle='white'; ctx.beginPath(); ctx.arc(x,y,1.5,0,Math.PI*2); ctx.fill();
+    }
+    drawDot(trajData.hackedY, '#ff3b3b', 'rgba(255,59,59,0.6)');
+    drawDot(trajData.trueY, '#00e676', 'rgba(0,230,118,0.6)');
+    drawDot(trajData.fusedY, '#00d4ff', 'rgba(0,212,255,0.7)');
+    drawDot(trajData.phoneY, '#c084fc', 'rgba(192,132,252,0.8)');
+}
+
+function drawTrajectory() {
+    if (currentViewMode === '2D') {
+        drawTactical2DArena(trajCtx, trajCanvas.width, trajCanvas.height);
+    } else {
+        draw1DDeviation(trajCtx, trajCanvas.width, trajCanvas.height);
+    }
+}
+
+// Silky smooth animation loop for tactical arena
+let lastFrameTime = performance.now();
+function animationLoop(now) {
+    const dt = Math.min((now - lastFrameTime) / 1000, 0.1);
+    lastFrameTime = now;
+    if (currentViewMode === '2D') {
+        advanceMission(dt);
+    }
+    drawTrajectory();
+    requestAnimationFrame(animationLoop);
+}
+requestAnimationFrame(animationLoop);
+
+// ========================================================================
+// Trust Gauges
+// ========================================================================
+function updateGauge(gaugeId, textId, value, cardId) {
+    const gauge = document.getElementById(gaugeId);
+    const text = document.getElementById(textId);
+    const offset = CIRCUMFERENCE - (value / 100) * CIRCUMFERENCE;
+    gauge.style.strokeDashoffset = offset;
+    text.textContent = Math.round(value) + '%';
+    let color;
+    if (value >= 70) color = 'var(--green)';
+    else if (value >= 40) color = 'var(--orange)';
+    else color = 'var(--red)';
+    gauge.style.stroke = color;
+    text.style.color = color;
+}
+
+function updateXvalDot(id, ok) {
+    const dot = document.getElementById(id);
+    dot.className = 'xval-dot ' + (ok ? 'ok' : 'fail');
+}
+
+// ========================================================================
+// Threat Log
+// ========================================================================
+let lastLogLength = 0;
+function updateThreatLog(log) {
+    if (log.length === lastLogLength) return;
+    lastLogLength = log.length;
+    const container = document.getElementById('threatLog');
+    if (log.length === 0) { container.innerHTML = '<div class="log-empty">No events yet — start the simulation</div>'; return; }
+    container.innerHTML = '';
+    [...log].reverse().forEach(entry => {
+        const div = document.createElement('div'); div.className = 'log-entry';
+        div.innerHTML = `<span class="log-time">${entry.time.toFixed(1)}s</span><span class="log-badge ${entry.severity}">${entry.type}</span><span class="log-msg">${entry.message}</span>`;
+        container.appendChild(div);
+    });
+}
+
+// ========================================================================
+// UI Updates
+// ========================================================================
+function updateSensorBars(imu) {
+    ['ax','ay','az','gx','gy','gz'].forEach(k => {
+        const v = imu[k], max = k[0]==='a' ? CONFIG.sensorBarMaxAccel : CONFIG.sensorBarMaxGyro;
+        const pct = Math.min(100, (Math.abs(v)/max)*100);
+        const bar = document.getElementById(`bar-${k}`), val = document.getElementById(`val-${k}`);
+        if (bar) bar.style.width = pct+'%'; if (val) val.textContent = v.toFixed(3);
+    });
+}
+
+function updateStatusCards(d) {
+    const tc = document.getElementById('threatCard'), tv = document.getElementById('threatValue');
+    const nc = document.getElementById('navCard'), nv = document.getElementById('navValue');
+    const iv = document.getElementById('imuValue');
+    if (!d.is_connected) {
+        tc.className='status-card threat-waiting'; tv.innerHTML='<span class="icon">⏳</span><span>WAITING</span>';
+        nv.innerHTML='<span class="icon">📡</span><span>—</span>'; nc.className='status-card';
+        iv.innerHTML='<span class="icon">📱</span><span>OFFLINE</span>';
+    } else if (d.attack_detected) {
+        tc.className='status-card threat-detected';
+        const typeLabel = d.attack_type==='multi_vector' ? 'MULTI-VECTOR ATTACK' : d.attack_type==='imu_injection' ? 'IMU INJECTION' : 'GPS SPOOFING';
+        tv.innerHTML=`<span class="icon">🚨</span><span>${typeLabel}</span>`;
+        nc.className='status-card nav-inertial'; nv.innerHTML='<span class="icon">🛡️</span><span>INERTIAL ONLY (SAARM)</span>';
+        iv.innerHTML='<span class="icon">📱</span><span style="color:var(--green)">STREAMING</span>';
+    } else {
+        tc.className='status-card threat-secure'; tv.innerHTML='<span class="icon">✅</span><span>SYSTEM SECURE</span>';
+        nc.className='status-card nav-fused'; nv.innerHTML='<span class="icon">🛰️</span><span>FUSED GPS + IMU</span>';
+        iv.innerHTML='<span class="icon">📱</span><span style="color:var(--green)">STREAMING</span>';
+    }
+}
+
+function updateAlgoStats(d) {
+    const el = (id, val, thresholds) => {
+        const e = document.getElementById(id); e.textContent = val.toFixed(2);
+        e.className = 'algo-stat-value ' + (val > thresholds[1] ? 'danger' : val > thresholds[0] ? 'warning' : 'safe');
+    };
+    el('chi2Val', d.chi_squared, [3, CONFIG.chi2Threshold]);
+    el('cusumVal', d.cusum, [10, CONFIG.cusumThreshold]);
+    el('residualVal', d.ekf_residual, [0.5, 2]);
+    document.getElementById('simTimeVal').textContent = d.sim_time.toFixed(1) + 's';
+}
+
+// ========================================================================
+// Socket.IO
+// ========================================================================
+socket.on('state_update', d => {
+    // Connection
+    const badge = document.getElementById('connBadge'), text = document.getElementById('connText');
+    const overlay = document.getElementById('trajOverlay');
+    if (d.is_connected) { badge.className='conn-badge connected'; text.textContent='LIVE'; overlay.classList.add('hidden'); }
+    else { badge.className='conn-badge disconnected'; text.textContent='DISCONNECTED'; overlay.classList.remove('hidden'); }
+    document.getElementById('packetCounter').textContent = d.packets.toLocaleString() + ' packets';
+
+    if (!d.is_connected) return;
+
+    updateStatusCards(d);
+    updateSensorBars(d.imu);
+    updateAlgoStats(d);
+
+    // Environmental
+    document.getElementById('val-baro').textContent = d.baro_alt.toFixed(1) + ' m';
+    document.getElementById('val-gpsalt').textContent = d.gps_alt.toFixed(1) + ' m';
+
+    // Trust gauges
+    updateGauge('gpsTrustGauge', 'gpsTrustText', d.gps_trust, 'gpsTrustCard');
+    updateGauge('imuTrustGauge', 'imuTrustText', d.imu_trust, 'imuTrustCard');
+    updateGauge('envTrustGauge', 'envTrustText', d.env_trust, 'envTrustCard');
+    updateGauge('sysTrustGauge', 'sysTrustText', d.system_integrity, 'sysTrustCard');
+
+    // Cross-validation dots
+    updateXvalDot('xvalGpsImu', d.gps_imu_agreement);
+    updateXvalDot('xvalImuAnomaly', !d.imu_anomaly);
+    updateXvalDot('xvalBaroGps', !d.baro_gps_mismatch);
+    updateXvalDot('xvalSystem', d.system_integrity > 60);
+
+    // Trajectory
+    trajData.trueY.push(d.true_y); trajData.hackedY.push(d.hacked_y); trajData.fusedY.push(d.fused_y);
+    if (trajData.trueY.length > CONFIG.maxDataPoints) { trajData.trueY.shift(); trajData.hackedY.shift(); trajData.fusedY.shift(); }
+
+    // Corridor & Physical Navigation Update
+    if (d.corridor) {
+        corridorHalfWidth = d.corridor.half_width || 1.8;
+        trajData.phoneY.push(d.corridor.lateral_pos);
+        if (trajData.phoneY.length > CONFIG.maxDataPoints) trajData.phoneY.shift();
+        
+        const latVal = document.getElementById('csLateralVal');
+        const headVal = document.getElementById('csHeadingVal');
+        const envVal = document.getElementById('csEnvelopeVal');
+        const card = document.getElementById('corridorCard');
+        const badge = document.getElementById('corridorBadge');
+        const alertBox = document.getElementById('corridorAlertBox');
+        
+        if (latVal && headVal && envVal) {
+            latVal.textContent = (d.corridor.lateral_pos >= 0 ? '+' : '') + d.corridor.lateral_pos.toFixed(2) + ' m';
+            headVal.textContent = (d.corridor.heading >= 0 ? '+' : '') + d.corridor.heading.toFixed(1) + '°';
+            
+            const isBreached = d.corridor.breached;
+            const isWarn = d.corridor.status === 'WARNING';
+            
+            latVal.className = 'cs-val ' + (isBreached ? 'danger' : isWarn ? 'warning' : 'safe');
+            headVal.className = 'cs-val ' + (Math.abs(d.corridor.heading) > 15 ? 'danger' : Math.abs(d.corridor.heading) > 8 ? 'warning' : 'safe');
+            envVal.className = 'cs-val ' + (isBreached ? 'danger' : 'safe');
+            envVal.textContent = isBreached ? 'VIOLATED' : 'AUTHORIZED';
+            
+            if (isBreached) {
+                card.classList.add('breached');
+                badge.textContent = 'WRONG PATH';
+                badge.style.background = 'var(--red-dim)';
+                badge.style.color = 'var(--red)';
+                alertBox.classList.remove('hidden');
+            } else if (isWarn) {
+                card.classList.remove('breached');
+                badge.textContent = 'CORRIDOR WARNING';
+                badge.style.background = 'var(--orange-dim)';
+                badge.style.color = 'var(--orange)';
+                alertBox.classList.add('hidden');
+            } else {
+                card.classList.remove('breached');
+                badge.textContent = 'ENVELOPE OK';
+                badge.style.background = 'var(--green-dim)';
+                badge.style.color = 'var(--green)';
+                alertBox.classList.add('hidden');
+            }
+        }
+
+        if (d.corridor.target_y !== undefined && d.corridor.target_y !== hackerTargetY) {
+            hackerTargetY = d.corridor.target_y;
+            hackerTargetLabel = d.corridor.target_label || `Spoof (${hackerTargetY >= 0 ? '+' : ''}${hackerTargetY.toFixed(1)}m)`;
+            const htDisp = document.getElementById('hackerTargetDisplay');
+            if (htDisp) htDisp.textContent = hackerTargetLabel;
+        }
+    }
+
+    drawTrajectory();
+
+    // Charts
+    addChartData(residualChart, d.ekf_residual);
+    addChartData(chiChart, d.chi_squared, [CONFIG.chi2Threshold]);
+    addChartData(cusumChart, d.cusum, [CONFIG.cusumThreshold]);
+
+    // Velocity chart
+    velocityChart.data.labels.push('');
+    velocityChart.data.datasets[0].data.push(d.velocity.vx);
+    velocityChart.data.datasets[1].data.push(d.velocity.vy);
+    velocityChart.data.datasets[2].data.push(d.velocity.vz);
+    if (velocityChart.data.labels.length > CONFIG.maxDataPoints) {
+        velocityChart.data.labels.shift();
+        velocityChart.data.datasets.forEach(ds => ds.data.shift());
+    }
+    velocityChart.update('none');
+
+    // FFT chart
+    if (d.fft_magnitudes && d.fft_magnitudes.length > 0) {
+        fftChart.data.labels = d.fft_freqs.map(f => f.toFixed(1) + 'Hz');
+        fftChart.data.datasets[0].data = d.fft_magnitudes;
+        // Color peaks differently
+        const maxMag = Math.max(...d.fft_magnitudes);
+        fftChart.data.datasets[0].backgroundColor = d.fft_magnitudes.map(m =>
+            m > maxMag * 0.7 ? 'rgba(255, 59, 59, 0.7)' : 'rgba(123, 97, 255, 0.5)'
+        );
+        fftChart.update('none');
+    }
+
+    // Threat Log
+    updateThreatLog(d.threat_log);
+});
+
+socket.on('spoofing_status', d => {
+    const btn = document.getElementById('attackBtn');
+    btn.className = 'attack-btn ' + (d.active ? 'deactivate' : 'activate');
+    btn.innerHTML = d.active ? '■ Stop GPS Spoof' : '⚡ GPS Spoofing';
+});
+socket.on('imu_injection_status', d => {
+    const btn = document.getElementById('imuAttackBtn');
+    btn.className = 'imu-attack-btn ' + (d.active ? 'deactivate' : 'activate');
+    btn.innerHTML = d.active ? '■ Stop IMU Inject' : '🔧 IMU Injection';
+});
+socket.on('simulation_reset', () => {
+    trajData.trueY=[]; trajData.hackedY=[]; trajData.fusedY=[]; trajData.phoneY=[];
+    [residualChart,chiChart,cusumChart,velocityChart].forEach(c => { c.data.labels=[]; c.data.datasets.forEach(ds => ds.data=[]); c.update('none'); });
+    fftChart.data.labels=[]; fftChart.data.datasets[0].data=[]; fftChart.update('none');
+    
+    const card = document.getElementById('corridorCard');
+    const badge = document.getElementById('corridorBadge');
+    const alertBox = document.getElementById('corridorAlertBox');
+    if (card) card.classList.remove('breached');
+    if (badge) { badge.textContent = 'ENVELOPE OK'; badge.style.background = 'var(--green-dim)'; badge.style.color = 'var(--green)'; }
+    if (alertBox) alertBox.classList.add('hidden');
+    
+    drawTrajectory(); lastLogLength = 0;
+    document.getElementById('attackBtn').className='attack-btn activate'; document.getElementById('attackBtn').innerHTML='⚡ GPS Spoofing';
+    document.getElementById('imuAttackBtn').className='imu-attack-btn activate'; document.getElementById('imuAttackBtn').innerHTML='🔧 IMU Injection';
+});
+
+// Recenter Button
+document.getElementById('recenterBtn').addEventListener('click', () => socket.emit('reset_corridor'));
+
+// Hacker Console Setup
+function setHackerTarget(y, label) {
+    hackerTargetY = y;
+    hackerTargetLabel = label;
+    const htDisp = document.getElementById('hackerTargetDisplay');
+    const yRange = document.getElementById('hackerYRange');
+    const yRangeVal = document.getElementById('hackerYRangeVal');
+    if (htDisp) htDisp.textContent = label;
+    if (yRange) yRange.value = y;
+    if (yRangeVal) yRangeVal.textContent = (y >= 0 ? '+' : '') + y + 'm';
+    socket.emit('set_hacker_target', { y: y, label: label });
+    drawTrajectory();
+}
+
+document.querySelectorAll('.hacker-preset').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.hacker-preset').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        setHackerTarget(parseFloat(btn.dataset.y), btn.dataset.label);
+    });
+});
+
+const yRange = document.getElementById('hackerYRange');
+const yRangeVal = document.getElementById('hackerYRangeVal');
+if (yRange) {
+    yRange.addEventListener('input', () => {
+        const val = parseInt(yRange.value);
+        if (yRangeVal) yRangeVal.textContent = (val >= 0 ? '+' : '') + val + 'm';
+        document.querySelectorAll('.hacker-preset').forEach(b => b.classList.remove('active'));
+        setHackerTarget(val, `Custom Target (${val >= 0 ? '+' : ''}${val}m)`);
+    });
+}
+
+// Mode toggle buttons
+document.getElementById('btnView2D').addEventListener('click', () => {
+    currentViewMode = '2D';
+    document.getElementById('btnView2D').classList.add('active');
+    document.getElementById('btnView1D').classList.remove('active');
+    document.getElementById('phaseBannerWrap').style.display = 'block';
+    document.getElementById('arenaTitle').textContent = 'Tactical Mission Arena (demo_animated_sentry)';
+    resizeCanvas();
+    drawTrajectory();
+});
+
+document.getElementById('btnView1D').addEventListener('click', () => {
+    currentViewMode = '1D';
+    document.getElementById('btnView1D').classList.add('active');
+    document.getElementById('btnView2D').classList.remove('active');
+    document.getElementById('phaseBannerWrap').style.display = 'none';
+    document.getElementById('arenaTitle').textContent = '1D Y-Axis Deviation Strip';
+    resizeCanvas();
+    drawTrajectory();
+});
+
+// Mission Control buttons
+function launchMission() {
+    sim.time = 0.0;
+    sim.pos = [...ARENA.start];
+    sim.gps = [...ARENA.start];
+    sim.trusted = [...ARENA.start];
+    sim.spoofTarget = null;
+    sim.spoofStartTime = null;
+    sim.detectionTime = null;
+    sim.serverAuthTime = null;
+    sim.recoveryRoute = [];
+    sim.recoveryIndex = 0;
+    sim.started = true;
+    sim.paused = false;
+    sim.trails.physical = [];
+    sim.trails.gps = [];
+    sim.trails.trusted = [];
+    document.getElementById('btnSimPause').textContent = '⏸ Pause [Space]';
+    setPhase('NOMINAL');
+}
+
+function togglePause() {
+    if (!sim.started || sim.phase === 'COMPLETE') return;
+    sim.paused = !sim.paused;
+    document.getElementById('btnSimPause').textContent = sim.paused ? '▶ Resume [Space]' : '⏸ Pause [Space]';
+}
+
+function replayAttack() {
+    const prevTarget = sim.lastSpoofTarget ? [...sim.lastSpoofTarget] : null;
+    const prevTime = sim.lastSpoofTime;
+    launchMission();
+    if (prevTarget && prevTime !== null) {
+        sim.scheduledReplay = { time: prevTime, target: prevTarget };
+    }
+}
+
+function zeroPhone() {
+    sim.phoneLatDrift = 0.0;
+    sim.phoneHeading = 0.0;
+    sim.phoneBreached = false;
+    updatePhaseBanner();
+    socket.emit('reset_corridor');
+}
+
+document.getElementById('btnSimLaunch').addEventListener('click', launchMission);
+document.getElementById('btnSimPause').addEventListener('click', togglePause);
+document.getElementById('btnSimReplay').addEventListener('click', replayAttack);
+document.getElementById('btnSimCalib').addEventListener('click', zeroPhone);
+
+// Keyboard shortcuts (Space, R, C)
+window.addEventListener('keydown', (e) => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        togglePause();
+    } else if (e.key === 'r' || e.key === 'R') {
+        replayAttack();
+    } else if (e.key === 'c' || e.key === 'C') {
+        zeroPhone();
+    }
+});
+
+// Click on map / arena
+trajCanvas.addEventListener('click', (e) => {
+    const rect = trajCanvas.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const clickY = e.clientY - rect.top;
+    
+    if (currentViewMode === '2D') {
+        const pad = { top: 25, bottom: 25, left: 45, right: 20 };
+        const pW = trajCanvas.width - pad.left - pad.right;
+        const pH = trajCanvas.height - pad.top - pad.bottom;
+        if (clickX >= pad.left && clickX <= trajCanvas.width - pad.right && clickY >= pad.top && clickY <= trajCanvas.height - pad.bottom) {
+            const east = Math.round(((clickX - pad.left) / pW) * ARENA.maxEast);
+            const north = Math.round(ARENA.maxNorth - ((clickY - pad.top) / pH) * ARENA.maxNorth);
+            if (sim.phase === 'NOMINAL' || sim.phase === 'READY') {
+                sim.started = true;
+                injectMissionSpoof([east, north]);
+            }
+        }
+    } else {
+        const pad = { top: 25, bottom: 25, left: 45, right: 15 };
+        const pH = trajCanvas.height - pad.top - pad.bottom;
+        const ratio = Math.max(0, Math.min(1, (clickY - pad.top) / pH));
+        const allY = [...trajData.trueY, ...trajData.hackedY, ...trajData.fusedY, ...(trajData.phoneY || []), hackerTargetY, -corridorHalfWidth - 1, corridorHalfWidth + 1];
+        let minY = Math.min(...allY), maxY = Math.max(...allY);
+        const yr = maxY - minY || 1; minY -= yr * 0.12; maxY += yr * 0.12;
+        const targetVal = Math.round(maxY - ratio * (maxY - minY));
+        document.querySelectorAll('.hacker-preset').forEach(b => b.classList.remove('active'));
+        setHackerTarget(targetVal, `Map Point (${targetVal >= 0 ? '+' : ''}${targetVal}m)`);
+    }
+});
+
+// Buttons
+document.getElementById('attackBtn').addEventListener('click', () => socket.emit('toggle_spoofing'));
+document.getElementById('imuAttackBtn').addEventListener('click', () => socket.emit('toggle_imu_injection'));
+document.getElementById('resetBtn').addEventListener('click', () => socket.emit('reset_simulation'));
+
+drawTrajectory();
+</script>
+</body>
+</html>
