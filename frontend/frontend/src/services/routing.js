@@ -10,7 +10,7 @@ function calculateDirectDistance(a, b) {
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
 
-function generateAirCorridor(source, destination, numPoints = 60) {
+export function generateAirCorridor(source, destination, numPoints = 60) {
   const points = [];
   const dist = calculateDirectDistance(source, destination);
   for (let i = 0; i <= numPoints; i++) {

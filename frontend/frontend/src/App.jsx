@@ -26,7 +26,7 @@ import {
 import "./App.css";
 import SensorMap from "./Components/SensorMap";
 import SensorCards from "./Components/SensorCards";
-import { getRoute, getRecoveryRoute } from "./services/routing";
+import { getRoute, getRecoveryRoute, generateAirCorridor } from "./services/routing";
 import { MISSION_PRESETS, calculateBearing } from "./services/presets";
 
 const DETECTION_THRESHOLD = 95; // meters (Chi-Square / CUSUM gate)
@@ -111,6 +111,9 @@ export default function App() {
   const missionRunningRef = useRef(false);
   const missionPausedRef = useRef(false);
   const quarantinedRef = useRef(false);
+  const spoofTimestampsRef = useRef([]);
+  const overrideToStartRef = useRef(false);
+  const [overrideToStart, setOverrideToStart] = useState(false);
   const spoofStartTimeRef = useRef(0);
 
   // Audit Log Helper
@@ -172,6 +175,12 @@ export default function App() {
 
   // Master Map Click Handler: Supports setting start, destination, and spoofing anytime!
   const handleMapClick = (pos) => {
+    // If high-frequency override is active, strictly reject new clicks/spoofs
+    if (overrideToStartRef.current) {
+      addAlert("🛑 DESTINATION LOCKED TO START: High-frequency cyber attack confirmed (>5 spoofing in 5s). Drone goes ONLY towards starting point!", "danger");
+      return;
+    }
+
     // 1. If currently choosing Start:
     if (selectionMode === "start" || !source) {
       setSource(pos);
@@ -215,6 +224,10 @@ export default function App() {
   };
 
   const handleDestDrag = (newPos) => {
+    if (overrideToStartRef.current) {
+      addAlert("🛑 DESTINATION LOCKED: Overridden to starting point under high-frequency cyber attack.", "danger");
+      return;
+    }
     setDestination(newPos);
     if (source) {
       computeRoute(source, newPos);
@@ -227,6 +240,50 @@ export default function App() {
 
   // Inject or Update Spoof Target at ANY time (like demo_animated_sentry)
   const injectOrUpdateSpoofTarget = (targetPos) => {
+    // 0. If return-to-start override is already active, reject any new targets
+    if (overrideToStartRef.current) {
+      addAlert("🛑 DESTINATION LOCKED TO START: High-frequency cyber attack confirmed (>5 spoofing in 5s). Drone goes ONLY towards starting point!", "danger");
+      return;
+    }
+
+    const now = Date.now();
+    spoofTimestampsRef.current.push(now);
+    // Filter to attacks within the last 5 seconds (5000 ms)
+    spoofTimestampsRef.current = spoofTimestampsRef.current.filter((t) => now - t <= 5000);
+
+    // CRITICAL USER REQUIREMENT: More than 5 spoofing found in 5 seconds!
+    if (spoofTimestampsRef.current.length > 5) {
+      overrideToStartRef.current = true;
+      setOverrideToStart(true);
+      spoofingRef.current = false;
+      setSpoofing(false);
+      quarantinedRef.current = true;
+      setQuarantined(true);
+      setSpoofTarget(null);
+      spoofTargetRef.current = null;
+
+      const currentVeh = vehiclePosRef.current || vehiclePosition;
+      const startPt = source || (route.length > 0 ? route[0] : null);
+
+      // OVERRIDE THE DESTINATION WITH STARTING POINT:
+      // No matter what the destination is, drone will go ONLY towards starting point!
+      if (startPt) {
+        setDestination(startPt);
+      }
+      setSecurityState("HIGH-FREQ HIJACK // RETURN TO START");
+      setRiskScore(100);
+      setGpsTrust(0);
+
+      addAlert("🚨 HIGH-FREQUENCY CYBER ATTACK CONFIRMED (>5 spoofing attacks in 5s)!", "danger");
+      addAlert("🛑 EMERGENCY OVERRIDE ENGAGED: Destination REPLACED with STARTING POINT.", "danger");
+      addAlert("✈ DRONE ENFORCED: Navigating ONLY towards initial starting point!", "warning");
+
+      if (currentVeh && startPt) {
+        triggerReturnToStartRecovery(currentVeh, startPt);
+      }
+      return;
+    }
+
     // 1. Immediately cancel any running recovery so new spoof attack takes full effect
     recoveryActiveRef.current = false;
     setRecoveryActive(false);
@@ -341,6 +398,9 @@ export default function App() {
     setRiskScore(4);
     setGpsTrust(100);
     setGpsDivergence(0);
+    overrideToStartRef.current = false;
+    setOverrideToStart(false);
+    spoofTimestampsRef.current = [];
     setSecurityState(route.length ? "ROUTE READY" : "SELECT WAYPOINTS");
 
     if (route.length > 0) {
@@ -362,7 +422,7 @@ export default function App() {
     spoofingRef.current = false;
     setSpoofTarget(null);
     spoofTargetRef.current = null;
-    if (!quarantinedRef.current) {
+    if (!quarantinedRef.current && !overrideToStartRef.current) {
       setSecurityState("FLIGHT NOMINAL");
       setRiskScore(8);
       setGpsTrust(100);
@@ -375,9 +435,44 @@ export default function App() {
     }
   };
 
+  // Return-to-Start Recovery Corridor Generation (Overrides destination with starting point)
+  const triggerReturnToStartRecovery = useCallback((currentPos, startPt) => {
+    if (!startPt || !currentPos) return;
+    addAlert("🛑 HIGH-FREQUENCY HIJACKING: Destination OVERRIDDEN with STARTING POINT.", "danger");
+    addAlert("Direct emergency air corridor locked directly to initial launch coordinates.", "info");
+
+    const returnCorridor = generateAirCorridor(currentPos, startPt, 50);
+    setDestination(startPt);
+    setRoute(returnCorridor.path);
+    routeIndexRef.current = 0;
+    setRecoveryRoute(returnCorridor.path);
+    recoveryRouteRef.current = returnCorridor.path;
+    recoveryIndexRef.current = 0;
+    setRecoveryActive(true);
+    recoveryActiveRef.current = true;
+    setSecurityState("RETURNING TO START POINT");
+    setRiskScore(95);
+    setGpsTrust(0);
+    setGpsDivergence(0);
+    addAlert("✈ Drone is now flying ONLY towards starting point. All new destinations blocked.", "warning");
+  }, [addAlert]);
+
   // Autonomous Recovery Rejoin Route Generation
   const triggerAutonomousRecovery = useCallback(async (currentPos) => {
     if (!route.length) return;
+
+    // If high-frequency override is active (>5 spoofs in 5s): ALWAYS return to starting point!
+    if (overrideToStartRef.current || spoofTimestampsRef.current.length > 5) {
+      overrideToStartRef.current = true;
+      setOverrideToStart(true);
+      const startPt = source || route[0];
+      if (startPt) {
+        setDestination(startPt);
+        triggerReturnToStartRecovery(currentPos, startPt);
+      }
+      return;
+    }
+
     try {
       addAlert("🛡 EKF QUARANTINE ENGAGED: GNSS fix isolated. Holding safe course.", "danger");
       addAlert("HMAC-SHA256 Server Validation: Calculating dynamic rejoin corridor...", "info");
@@ -430,12 +525,73 @@ export default function App() {
       const curPos = vehiclePosRef.current || vehiclePosition;
       if (!curPos) return;
 
+      // ── Priority 0: High-Frequency Cyber Attack Return-to-Start Override ──
+      // "no matter what the destination is, drone will go only towards starting point"
+      if (overrideToStartRef.current) {
+        const startTarget = source || (route.length > 0 ? route[0] : null);
+        if (startTarget) {
+          let target = startTarget;
+          const rPath = recoveryRouteRef.current;
+          const rIdx = recoveryIndexRef.current;
+          if (rPath && rPath.length > 0 && rIdx < rPath.length - 1) {
+            target = rPath[rIdx + 1];
+          }
+
+          const next = moveTowards(curPos, target, 0.00060 * simulationSpeed);
+          vehiclePosRef.current = next;
+          setVehiclePosition(next);
+          setVehicleHeading(calculateBearing(curPos, target));
+          setBreadcrumbTrail((prev) => [...prev.slice(-100), next]);
+
+          if (rPath && rPath.length > 0) {
+            if (distanceBetween(next, target) < 22) {
+              recoveryIndexRef.current = Math.min(rIdx + 1, rPath.length - 1);
+            }
+            setRecoveryProgress(recoveryIndexRef.current / Math.max(1, rPath.length - 1));
+          }
+
+          const distToStart = distanceBetween(next, startTarget);
+          if (distToStart < 22) {
+            vehiclePosRef.current = startTarget;
+            setVehiclePosition(startTarget);
+            setMissionRunning(false);
+            missionRunningRef.current = false;
+            setRecoveryActive(false);
+            recoveryActiveRef.current = false;
+            setRecoveryProgress(1);
+            setSecurityState("SECURED AT STARTING POINT");
+            setRiskScore(0);
+            setGpsTrust(100);
+            setGpsDivergence(0);
+            addAlert("✅ SAFE AT STARTING POINT: Return-to-start completed under high-frequency cyber attack override.", "success");
+            addAlert("High-frequency attack neutralized. Drone secured at initial departure location.", "success");
+            return;
+          }
+        }
+        return; // CRITICAL: NEVER proceed to spoof drift or normal forward flight!
+      }
+
       // ── Scenario A: Recovery in Progress ──────────────────────────────
       if (recoveryActiveRef.current && recoveryRouteRef.current.length > 0) {
         const rPath = recoveryRouteRef.current;
         const rIdx = recoveryIndexRef.current;
 
         if (rIdx >= rPath.length - 1) {
+          if (overrideToStartRef.current) {
+            setRecoveryActive(false);
+            recoveryActiveRef.current = false;
+            setRecoveryProgress(1);
+            setMissionRunning(false);
+            missionRunningRef.current = false;
+            setSecurityState("SECURED AT STARTING POINT");
+            setRiskScore(0);
+            setGpsTrust(100);
+            setGpsDivergence(0);
+            addAlert("✅ MISSION TERMINATED SAFELY: Drone returned and secured at STARTING POINT.", "success");
+            addAlert("High-frequency attack fully neutralized. Vehicle secured at launch coordinates.", "success");
+            return;
+          }
+
           // Rejoin Complete!
           setRecoveryActive(false);
           recoveryActiveRef.current = false;
@@ -510,14 +666,19 @@ export default function App() {
           spoofingRef.current = false;
           setGpsTrust(0);
           setRiskScore(100);
-          setSecurityState("GPS QUARANTINED");
+          setSecurityState(overrideToStartRef.current ? "RETURNING TO START POINT" : "GPS QUARANTINED");
 
           addAlert(`🚨 ANOMALY: GPS Divergence = ${Math.round(divergence)}m (Limit: ${DETECTION_THRESHOLD}m)`, "danger");
           addAlert("Chi-Square NIS Gate: EXCEEDED (p < 0.0001). Innovation rejected.", "danger");
           addAlert("CUSUM Drift Monitor: PERSISTENT DRIFT CONFIRMED.", "danger");
           addAlert("SAARM Bank: GNSS Receiver Isolated. Primary flight control switched to EKF.", "warning");
 
-          triggerAutonomousRecovery(deceivedStep);
+          if (overrideToStartRef.current) {
+            const startPt = source || route[0];
+            triggerReturnToStartRecovery(deceivedStep, startPt);
+          } else {
+            triggerAutonomousRecovery(deceivedStep);
+          }
         }
         return;
       }
@@ -574,6 +735,7 @@ export default function App() {
         missionRunning={missionRunning}
         recoveryActive={recoveryActive}
         quarantined={quarantined}
+        overrideToStart={overrideToStart}
         followVehicle={followVehicle}
         onMapClick={handleMapClick}
         onSourceDrag={handleSourceDrag}
@@ -682,17 +844,25 @@ export default function App() {
                 <div className={`pick-row ${selectionMode === "dest" ? "active" : ""}`}>
                   <div className="pick-indicator dest">D</div>
                   <div className="pick-meta">
-                    <span className="pick-label">FINAL DESTINATION (TARGET)</span>
-                    <span className="pick-coords">
+                    <span className="pick-label">
+                      FINAL DESTINATION (TARGET)
+                      {overrideToStart && (
+                        <span style={{ color: "#fb7185", marginLeft: "6px", fontWeight: "bold" }}>
+                          [OVERRIDDEN TO START]
+                        </span>
+                      )}
+                    </span>
+                    <span className="pick-coords" style={overrideToStart ? { color: "#fb7185", fontWeight: "bold" } : {}}>
                       {destination ? `${destination[0].toFixed(4)}, ${destination[1].toFixed(4)}` : "Click map to choose"}
+                      {overrideToStart && " (LOCKED TO START POINT)"}
                     </span>
                   </div>
                   <button
                     className={`pick-action-btn ${selectionMode === "dest" ? "active" : ""}`}
                     onClick={() => setSelectionMode("dest")}
-                    disabled={missionRunning}
+                    disabled={missionRunning || overrideToStart}
                   >
-                    {selectionMode === "dest" ? "CLICK MAP..." : "SET"}
+                    {overrideToStart ? "LOCKED" : selectionMode === "dest" ? "CLICK MAP..." : "SET"}
                   </button>
                 </div>
               </div>

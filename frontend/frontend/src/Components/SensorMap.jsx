@@ -323,6 +323,7 @@ export default function SensorMap({
   missionRunning = false,
   recoveryActive = false,
   quarantined = false,
+  overrideToStart = false,
   followVehicle = true,
   onMapClick,
   onSourceDrag,
@@ -344,7 +345,13 @@ export default function SensorMap({
 
   // Guidance banner message
   let promptBanner = null;
-  if (selectionMode === "start") {
+  if (overrideToStart) {
+    promptBanner = (
+      <div className="onmap-guidance-pill spoof" style={{ background: "rgba(244, 63, 94, 0.95)", color: "#ffffff", borderColor: "#ffffff", fontWeight: 800 }}>
+        🛑 HIGH-FREQUENCY CYBER ATTACK: DESTINATION OVERRIDDEN WITH STARTING POINT — RETURNING TO START
+      </div>
+    );
+  } else if (selectionMode === "start") {
     promptBanner = (
       <div className="onmap-guidance-pill start">
         📍 CLICK ANYWHERE ON THE MAP TO SET INITIAL DEPARTURE (START)
@@ -425,12 +432,12 @@ export default function SensorMap({
           </Marker>
         )}
 
-        {/* Destination Pin (Draggable when not flying) */}
+        {/* Destination Pin (Draggable when not flying and not overridden) */}
         {destination && (
           <Marker
             position={destination}
             icon={destinationIcon}
-            draggable={!missionRunning}
+            draggable={!missionRunning && !overrideToStart}
             eventHandlers={{
               dragend(e) {
                 const ll = e.target.getLatLng();
@@ -439,9 +446,9 @@ export default function SensorMap({
             }}
           >
             <Popup className="tactical-popup">
-              <strong>FINAL DESTINATION</strong><br />
+              <strong>{overrideToStart ? "DESTINATION OVERRIDDEN TO START" : "FINAL DESTINATION"}</strong><br />
               {destination[0].toFixed(5)}, {destination[1].toFixed(5)}<br />
-              <small>Drag to adjust destination</small>
+              <small>{overrideToStart ? "Target locked to initial start point under cyber attack" : "Drag to adjust destination"}</small>
             </Popup>
           </Marker>
         )}
