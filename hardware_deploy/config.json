@@ -1,0 +1,35 @@
+{
+  "drone": {
+    "vehicle_id": "DRONE-ALPHA-01",
+    "companion_component_id": 191,
+    "system_id": 1
+  },
+  "connection": {
+    "type": "mavlink",
+    "primary_endpoint": "/dev/ttyAMA0:921600",
+    "secondary_endpoint": "udpin:0.0.0.0:14550",
+    "baud": 921600,
+    "heartbeat_frequency_hz": 2.0
+  },
+  "mission_envelope": {
+    "corridor_half_width_m": 1.8,
+    "max_altitude_ceiling_m": 120.0,
+    "min_altitude_floor_m": 10.0,
+    "max_horizontal_speed_m_s": 22.0,
+    "geofence_enforce": true
+  },
+  "security_monitors": {
+    "chi_square_confidence": 0.999,
+    "cusum_alarm_threshold": 10.0,
+    "cusum_warning_threshold": 5.0,
+    "cusum_slack": 0.5,
+    "saarm_isolation_threshold": 2.0,
+    "saarm_min_alarms": 3
+  },
+  "failsafe_actuation": {
+    "action_on_spoofing": "HOVER",
+    "action_on_breach": "INERTIAL_CORRIDOR_REJOIN",
+    "require_clearance_to_resume": true,
+    "safe_stop_delay_s": 0.0
+  }
+}

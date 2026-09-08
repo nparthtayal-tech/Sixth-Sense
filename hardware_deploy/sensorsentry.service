@@ -1,0 +1,19 @@
+[Unit]
+Description=SensorSentry Autonomous Drone Avionics & Spoofing Defense Engine
+After=network.target local-fs.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/sensorsentry/hardware_deploy
+ExecStart=/usr/bin/python3 /opt/sensorsentry/hardware_deploy/main.py --mode mavlink --config /opt/sensorsentry/hardware_deploy/config.json
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+Nice=-10
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=50
+
+[Install]
+WantedBy=multi-user.target

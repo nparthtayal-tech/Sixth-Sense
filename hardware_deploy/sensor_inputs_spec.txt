@@ -1,0 +1,71 @@
+SENSORSENTRY SCHEMA-V1 TELEMETRY SPECIFICATION
+===============================================
+
+Every packet is a UTF-8 JSON object. UDP transports exactly one object per
+datagram; serial transports one object followed by a newline. The companion
+computer accepts packets only after HMAC-SHA256 verification, freshness checks,
+and monotonically increasing sequence validation per vehicle.
+
+COMMON FIELDS
+-------------
+schema_version  Integer; must be 1.
+vehicle_id      String; must match --drone-id exactly.
+sequence        Non-negative integer; strictly increases for each vehicle.
+timestamp       Unix seconds, UTC. Accepted window defaults to [-2.0s, +0.5s].
+sensor          "IMU" or "GNSS".
+signature       Lowercase hexadecimal HMAC-SHA256 over the object excluding this
+                field, serialized with sort_keys=True and separators=(',', ':').
+
+IMU PACKET
+----------
+{
+  "schema_version": 1,
+  "vehicle_id": "DRONE-ALPHA-01",
+  "sequence": 1001,
+  "timestamp": 1788895000.125,
+  "sensor": "IMU",
+  "frame": "BODY_FRD",
+  "yaw_rate_rad_s": 0.010,
+  "forward_accel_m_s2": 0.12,
+  "signature": "..."
+}
+
+BODY_FRD is forward-right-down. The estimator measurement is exactly
+[yaw_rate_rad_s, forward_accel_m_s2]. A sensor bridge is responsible for
+attitude compensation and axis conversion before transmitting this packet.
+
+GNSS PACKET: LOCAL NED PREFERRED
+---------------------------------
+{
+  "schema_version": 1,
+  "vehicle_id": "DRONE-ALPHA-01",
+  "sequence": 1002,
+  "timestamp": 1788895000.200,
+  "sensor": "GNSS",
+  "frame": "NED",
+  "position_ned_m": [12.3, -4.1, -18.6],
+  "velocity_ned_m_s": [1.15, 0.02, 0.00],
+  "fix_type": 3,
+  "satellites": 14,
+  "signature": "..."
+}
+
+NED is north-east-down. GNSS requires a 3D fix (fix_type >= 3) and at least six
+satellites. The estimator measurement is exactly
+[north_m, east_m, down_m, velocity_north_m_s, velocity_east_m_s,
+ velocity_down_m_s].
+
+GNSS PACKET: WGS-84 ALTERNATIVE
+--------------------------------
+Replace position_ned_m with latitude_deg, longitude_deg, and altitude_m. The
+runner converts those fields to NED relative to --home-lat-deg,
+--home-lon-deg, and --home-alt-m using WGS-84 ECEF rotation. Home and packet
+altitudes must use the same ellipsoid-altitude reference; do not mix MSL and
+ellipsoid heights.
+
+SECURITY NOTES
+--------------
+Use a unique 32-byte key for each operational boundary. Store keys in a secret
+manager, never in source code or telemetry logs. Configure an IP allowlist when
+the companion link has a stable address. MAVLink contingency commands require
+MAVLink-2 signing with a separate 32-byte key and reject unsigned frames.
