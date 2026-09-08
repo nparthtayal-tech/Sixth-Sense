@@ -36,16 +36,15 @@ import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Circle
 from matplotlib.widgets import Button
+import tkinter as tk
+from tkinter import filedialog
 
 # Ensure local packages are importable
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 sys.path.insert(0, os.path.join(BASE_DIR, "filterpy-master"))
 
-from decision_making import (
-    ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus,
-    HighFrequencyAttackDetector, HighFrequencySignal,
-)
+from decision_making import ChiSquareGate, CusumMonitor, LSTMAutoEncoderMonitor, MLStatus
 from decision_making.cusum_monitor import DriftStatus
 from ekf_fusion import MultiSensorEKF, SensorType
 from ekf_fusion.sensor_models import (
@@ -56,6 +55,7 @@ from ekf_fusion.sensor_models import (
 )
 from hal import SimulatedBus
 from waypoint_security import CommandValidator, WaypointCommand
+from waypoint_security.custom_map_manager import CustomMapManager
 
 # ── Visual palette ──────────────────────────────────────────────────────
 BG = "#0b1220"
@@ -196,6 +196,7 @@ class InteractiveSpoofDemo:
         self._last_spoof_time: Optional[float] = None
         self._route_index = 0
         self.selected_route_name = ROUTE_NAMES[0]
+        self.custom_map_manager = None
         self._reset_state(keep_last_attack=True)
         if build_figure:
             self.build_figure()
@@ -235,7 +236,6 @@ class InteractiveSpoofDemo:
         self.route_progress_at_spoof = 0.0
         self.rejoin_progress = 0.0
         self.spoof_count = 0
-        self.spoof_timestamps: List[float] = []
         self.phase = "READY"
         self.mission_started = False
         self.spoof_active = False
@@ -268,17 +268,6 @@ class InteractiveSpoofDemo:
             auto_recover_after=0,
         )
         self.ml_monitor = LSTMAutoEncoderMonitor(alarm_threshold=220.0, warning_threshold=90.0)
-        self.hf_detector = HighFrequencyAttackDetector(
-            freq_threshold_hz=1.5,
-            burst_window_s=4.0,
-            burst_count_threshold=2,
-            drift_override_threshold_m=4.0,
-        )
-        self.hf_detector.set_start_position(START)
-        self.override_to_start = False
-        self.overall_drift = np.zeros(2)
-        self.negative_drift = np.zeros(2)
-        self._hf_logged = False
         # Sensor noise covariance matrices
         self._gnss_R = gnss_default_R(sigma_pos=1.5, sigma_alt=2.5, sigma_vel=0.1)
         self._imu_R = imu_default_R(sigma_gyro=0.005, sigma_accel=0.05)
@@ -366,16 +355,6 @@ class InteractiveSpoofDemo:
         self._last_spoof_target = target.copy()
         self._last_spoof_time = self.time_s
         self.spoof_count += 1
-        self.spoof_timestamps.append(self.time_s)
-
-        recent_spoofs = [t for t in self.spoof_timestamps if (self.time_s - t) <= 5.0]
-        if len(recent_spoofs) > 5:
-            self.override_to_start = True
-            self._add_event(
-                "HIGH-FREQ CYBER HIJACK CONFIRMED (>5 spoofing in 5s): "
-                "Destination OVERRIDDEN with STARTING POINT! Returning directly to start.",
-                RED,
-            )
 
         # If vehicle is currently in NOMINAL, reset CUSUM/detectors for the new attack profile
         if self.phase == "NOMINAL":
@@ -429,11 +408,6 @@ class InteractiveSpoofDemo:
             return
         if self.phase == "COMPLETE":
             self._add_event("MISSION COMPLETE: Destination reached. Re-launch mission to test again.", YELLOW)
-            self.render()
-            self.fig.canvas.draw_idle()
-            return
-        if self.override_to_start:
-            self._add_event("OVERRIDE LOCKED: Returning to START location under continuous cyber attack. New destinations rejected!", YELLOW)
             self.render()
             self.fig.canvas.draw_idle()
             return
@@ -576,13 +550,12 @@ class InteractiveSpoofDemo:
         return signal.verdict.name == "ACCEPTED"
 
     def _make_recovery_route(self) -> List[np.ndarray]:
-        """Return a recovery corridor back to START (if under attack override) or rejoin path."""
-        if self.override_to_start or self.hf_detector.is_override_active():
-            # Stop drift and return directly to START location using negative drift trajectory
-            overall_drift = self.position - START
-            mid_safe = self.position - 0.5 * overall_drift
-            return [self.position.copy(), mid_safe, START.copy()]
+        """Return a server-approved corridor to rejoin the original planned route.
 
+        The route goes to a rejoin point ON the planned path (not directly
+        to the destination). After reaching it the drone resumes nominal
+        route-following and can be spoofed again.
+        """
         route = self.selected_route
         route_vector = DESTINATION - START
         route_length_sq = float(np.dot(route_vector, route_vector))
@@ -628,16 +601,8 @@ class InteractiveSpoofDemo:
             if np.linalg.norm(self.position - target) < 0.15:
                 self.recovery_index += 1
                 if self.recovery_index >= len(self.recovery_route) - 1:
-                    if self.override_to_start or self.hf_detector.is_override_active():
-                        self.position = START.copy()
-                        self.phase = "COMPLETE"
-                        self._add_event(
-                            f"SAFE AT START LOCATION: Return-to-launch completed under continuous attack override. "
-                            f"Drift canceled. Survived {self.spoof_count} attacks.", GREEN,
-                        )
-                    else:
-                        # Reached the rejoin point on the planned route
-                        self._rejoin_nominal()
+                    # Reached the rejoin point on the planned route
+                    self._rejoin_nominal()
 
     def _rejoin_nominal(self) -> None:
         """Transition from recovery back to nominal route-following.
@@ -717,6 +682,20 @@ class InteractiveSpoofDemo:
         dim_m = len(z_gnss)
         self.ekf_innovation_mag = float(np.linalg.norm(y[0:2]))
 
+        # Physical Impossibility Check (Instant Quarantine)
+        if self.custom_map_manager is not None and self.spoof_active:
+            if self.custom_map_manager.is_collision(self.gps_position[0], self.gps_position[1]):
+                self.gnss_accepted = False
+                if self.phase == "NOMINAL":
+                    self.phase = "QUARANTINED"
+                    self.detection_time = self.time_s
+                    self.bus.send(b"GPS_QUARANTINED", "SAARM")
+                    self._add_event(
+                        "PHYSICAL IMPOSSIBILITY: Spoofed GNSS position inside an obstacle. EKF rejects instantly.",
+                        RED,
+                    )
+                return
+
         # Feed innovation to Chi-Square (fast), CUSUM (slow), and LSTM-AE (ML)
         fast_signal = self.chi_gate.evaluate("GNSS", self.time_s, y, S, dim_m)
         slow_signal = self.cusum.evaluate("GNSS", self.time_s, y, S, dim_m)
@@ -758,37 +737,12 @@ class InteractiveSpoofDemo:
                 f"LSTM-AE ML WARNING: Sequence reconstruction loss MSE={self.ml_mse:.1f} (thresh={self.ml_monitor.alarm_threshold:.0f}).",
                 ORANGE,
             )
-
-        # 9. Evaluate High-Frequency Cyber Attacks & Negative Drift
-        hf_signal = self.hf_detector.record_and_evaluate(
-            "GNSS", self.time_s, y, self.position, is_attack_sample=self.spoof_active
-        )
-        self.overall_drift = hf_signal.overall_drift_vector
-        self.negative_drift = hf_signal.negative_drift_vector
-
-        recent_spoofs = [t for t in self.spoof_timestamps if (self.time_s - t) <= 5.0]
-        if hf_signal.override_to_start or len(recent_spoofs) > 5:
-            self.override_to_start = True
-            if not self._hf_logged:
-                self._hf_logged = True
-                self._add_event(
-                    f"HIGH-FREQ CYBER ATTACK ({hf_signal.attack_frequency_hz:.1f}Hz, pattern={hf_signal.attack_pattern.name}): "
-                    f"Destination OVERRIDDEN with STARTING POINT. Negative drift ({np.linalg.norm(self.negative_drift):.1f}m) canceling attack. Drone returning to START.",
-                    RED,
-                )
-
-        # Quarantines on CUSUM alarm OR ML alarm OR High-Frequency Override
-        if self.phase == "NOMINAL" and self.spoof_active and (
-            slow_signal.status == DriftStatus.ALARM
-            or ml_signal.status == MLStatus.ALARM
-            or self.override_to_start
-        ):
+        # Quarantines on CUSUM alarm OR ML alarm
+        if self.phase == "NOMINAL" and self.spoof_active and (slow_signal.status == DriftStatus.ALARM or ml_signal.status == MLStatus.ALARM):
             self.phase = "QUARANTINED"
             self.detection_time = self.time_s
             self.bus.send(b"GPS_QUARANTINED", "SAARM")
-            trigger_src = "HIGH-FREQ OVERRIDE" if self.override_to_start else (
-                "CUSUM + LSTM-AE" if (slow_signal.status == DriftStatus.ALARM and ml_signal.status == MLStatus.ALARM) else ("LSTM-AE ML" if ml_signal.status == MLStatus.ALARM else "CUSUM")
-            )
+            trigger_src = "CUSUM + LSTM-AE" if (slow_signal.status == DriftStatus.ALARM and ml_signal.status == MLStatus.ALARM) else ("LSTM-AE ML" if ml_signal.status == MLStatus.ALARM else "CUSUM")
             self._add_event(
                 f"ANOMALY CONFIRMED ({trigger_src}): Persistent GNSS drift confirmed. "
                 "SAARM isolates GNSS; drone holds on EKF fusion of IMU+Camera+LiDAR.",
@@ -997,12 +951,16 @@ class InteractiveSpoofDemo:
             self.fig.add_axes([0.535, 0.035, 0.115, 0.045]),
             "Clear Spoof  [C]", color="#991b1b", hovercolor="#b91c1c",
         )
+        self.load_map_button = Button(
+            self.fig.add_axes([0.660, 0.035, 0.110, 0.045]),
+            "Load Map  [M]", color="#0369a1", hovercolor="#0284c7",
+        )
         self.route_label = self.fig.text(
-            0.665, 0.057, f"Route: {self.selected_route_name}",
+            0.780, 0.057, f"Route: {self.selected_route_name}",
             color=CYAN, fontsize=9, fontweight="bold", va="center",
         )
 
-        for btn in [self.launch_button, self.pause_button, self.replay_button, self.route_button, self.clear_button]:
+        for btn in [self.launch_button, self.pause_button, self.replay_button, self.route_button, self.clear_button, self.load_map_button]:
             btn.label.set_color("white")
 
         self.launch_button.on_clicked(self.launch_mission)
@@ -1010,6 +968,7 @@ class InteractiveSpoofDemo:
         self.replay_button.on_clicked(self.replay_last_attack)
         self.route_button.on_clicked(self.cycle_route)
         self.clear_button.on_clicked(self.clear_spoof)
+        self.load_map_button.on_clicked(self.load_custom_map)
 
         self.fig.text(
             0.975, 0.057,
@@ -1052,7 +1011,37 @@ class InteractiveSpoofDemo:
             self.cycle_route()
         elif key == "c":
             self.clear_spoof()
+        elif key == "m":
+            self.load_custom_map()
 
+    def load_custom_map(self, _event=None) -> None:
+        """Opens a file dialog to load a custom floor plan and initializes CustomMapManager."""
+        root = tk.Tk()
+        root.attributes("-topmost", True)
+        root.withdraw()
+        file_path = filedialog.askopenfilename(
+            title="Select Custom Floor Plan",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg")]
+        )
+        if file_path:
+            self.custom_map_manager = CustomMapManager(file_path, real_width_m=175.0)
+            self._add_event(f"MAP LOADED: {os.path.basename(file_path)}", GREEN)
+            
+            self.ax_map.set_ylim(0, self.custom_map_manager.real_height_m)
+            
+            if hasattr(self, "map_image"):
+                self.map_image.remove()
+                
+            self.map_image = self.ax_map.imshow(
+                self.custom_map_manager.image_data, 
+                extent=self.custom_map_manager.get_extent(),
+                origin="upper",
+                alpha=0.6,
+                zorder=1
+            )
+            self.render()
+            self.fig.canvas.draw_idle()
+            
     def _tick(self, _frame) -> None:
         if not self._paused:
             self.advance()
