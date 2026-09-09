@@ -44,7 +44,7 @@ from response import SafeStopController, SafeStopState, FleetAlertBroadcaster
 from hal import HardwareBus, SensorReading
 
 
-@dataclass(frozen=True)
+@dataclass
 class DirectionalRecoveryGuidance:
     """Trusted navigation command produced after directional GNSS spoofing.
 

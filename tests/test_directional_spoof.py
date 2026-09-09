@@ -191,7 +191,9 @@ class TestDirectionalSpoofDetector(unittest.TestCase):
         R_dummy = np.eye(6) * 0.5
         t = 1.0
         for i in range(5):
-            t += 0.2
+            # Wider spacing keeps this test focused on the directional
+            # detector rather than the separate high-frequency override.
+            t += 1.5
             # 6D GNSS reading [px, py, pz, vx, vy, vz] with growing eastward offset
             reading = SensorReading(
                 timestamp=t,

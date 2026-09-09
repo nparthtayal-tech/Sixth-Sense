@@ -155,6 +155,17 @@ def udp_listener():
                     state.last_packet_time = time.time()
                     state.is_connected = True
                     state.packets_received += 1
+                    
+                    # Direct Optical Tracker support
+                    if packet.get("source") == "optical_tracker":
+                        drift_m = float(packet.get("lateral_offset_m", 0.0))
+                        is_b = bool(packet.get("breached", False))
+                        state.phone_lateral_pos = drift_m
+                        state.corridor_breached = is_b
+                        state.corridor_status = "BREACHED" if is_b else "NOMINAL"
+                        if is_b:
+                            state.history_envelope_violation = True
+                    
                     state.prev_imu = dict(state.latest_imu)
                     for k in state.latest_imu:
                         if k in packet:
