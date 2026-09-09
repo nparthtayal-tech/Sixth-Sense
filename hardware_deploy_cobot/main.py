@@ -71,6 +71,7 @@ def create_sentry(
     connection = config["connection"]
     monitors = config["security_monitors"]
 
+    statistical = config.get("statistical_monitors", {})
     limits = CobotSafetyLimits(
         map_boundary=MapBoundary.from_config(envelope["map_bounds_m"]),
         corridor_half_width_m=float(envelope["corridor_half_width_m"]),
@@ -79,6 +80,12 @@ def create_sentry(
         minimum_obstacle_distance_m=float(envelope["minimum_obstacle_distance_m"]),
         max_localization_jump_m=float(envelope["max_localization_jump_m"]),
         sensor_timeout_s=float(connection["sensor_timeout_s"]),
+        chi_square_confidence=float(statistical.get("chi_square_confidence", 0.999)),
+        cusum_alarm_threshold=float(statistical.get("cusum_alarm_threshold", 10.0)),
+        cusum_warning_threshold=float(statistical.get("cusum_warning_threshold", 5.0)),
+        cusum_slack=float(statistical.get("cusum_slack", 0.5)),
+        max_consecutive_outliers=int(statistical.get("max_consecutive_outliers", 3)),
+        enable_statistical_monitors=bool(statistical.get("enabled", True)),
     )
 
     if persistence_path is None and monitors.get("state_persistence_file"):
@@ -198,7 +205,14 @@ def run_test_mode(config: Mapping[str, Any]) -> None:
     robot_id = "COBOT-SELF-TEST"
     control = AdvisoryCobotControl()
     key = load_hmac_key(DEMO_KEY_B64)
-    sentry = create_sentry(config, robot_id, control, supervisor_key=key)
+    test_state = BASE_DIR / "state.json"
+    if test_state.exists():
+        try:
+            test_state.unlink()
+        except OSError:
+            pass
+
+    sentry = create_sentry(config, robot_id, control, supervisor_key=key, persistence_path=test_state)
     authenticator = PacketAuthenticator(key, robot_id, max_age_s=5.0, window_size=128)
 
     # 1. Nominal packet
@@ -241,7 +255,26 @@ def run_test_mode(config: Mapping[str, Any]) -> None:
     assert decode_and_process(json.dumps(clear_pkt).encode("utf-8"), sentry, authenticator)
     assert not sentry.safe_stop.is_stopped
 
-    print("[PASS] authenticated cobot telemetry, sliding replay window, containment latch, and supervisor clearance verified.")
+    # 5. Verify EKF state estimation and Chi-Square / NIS containment
+    assert sentry.ekf_initialized
+    assert abs(sentry.filtered_position[0] - 1.1) < 0.5
+
+    # A sudden localization jump (spoofing attempt: jump from ~1.1m to 8.5m)
+    spoofed_loc = _signed_packet(
+        key, 6, "LOCALIZATION", frame="map", position_m=[8.5, 1.0], yaw_rad=0.0,
+        linear_velocity_m_s=0.2, angular_velocity_rad_s=0.0,
+    )
+    assert not decode_and_process(spoofed_loc, sentry, authenticator)
+    assert sentry.safe_stop.is_stopped
+
+    # Clean up test state file
+    if test_state.exists():
+        try:
+            test_state.unlink()
+        except OSError:
+            pass
+
+    print("[PASS] authenticated cobot telemetry, sliding replay window, EKF fusion, Chi-Square NIS gating, and supervisor clearance verified.")
 
 
 def load_trusted_route(sentry: CobotSentry, path: Path) -> None:

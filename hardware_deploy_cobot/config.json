@@ -27,6 +27,14 @@
     "state_persistence_file": "state.json",
     "supervisor_clearance_key_env": "SENSORSENTRY_SUPERVISOR_KEY"
   },
+  "statistical_monitors": {
+    "enabled": true,
+    "chi_square_confidence": 0.999,
+    "cusum_alarm_threshold": 10.0,
+    "cusum_warning_threshold": 5.0,
+    "cusum_slack": 0.5,
+    "max_consecutive_outliers": 3
+  },
   "failsafe_actuation": {
     "action_on_localization_attack": "CANCEL_NAVIGATION_AND_STOP",
     "action_on_geofence_breach": "CANCEL_NAVIGATION_AND_STOP",

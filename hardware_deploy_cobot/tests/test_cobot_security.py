@@ -206,6 +206,77 @@ class CobotSecurityTests(unittest.TestCase):
         controller.clear(lockdown_token, allow_lockdown_clear=True)
         self.assertEqual(controller.state, SafeStopState.NOMINAL)
 
+    def test_chi_square_nis_rejects_sudden_localization_spike(self) -> None:
+        supervisor, bus, control = sentry()
+        # Initialize nominal odometry and state at [2.0, 2.0]
+        odom1 = parse_packet(sensor_packet(
+            "ODOMETRY", 1, frame="map", position_m=[2.0, 2.0], yaw_rad=0.0,
+            linear_velocity_m_s=0.2, angular_velocity_rad_s=0.0,
+        ))
+        self.assertTrue(supervisor.process_sensor_reading(odom1))
+        self.assertTrue(supervisor.ekf_initialized)
+        self.assertAlmostEqual(supervisor.filtered_position[0], 2.0, delta=0.1)
+
+        # Inject sudden localization spike (e.g. multipath or spoofing: jump to [7.0, 2.0])
+        loc_spike = parse_packet(sensor_packet(
+            "LOCALIZATION", 2, frame="map", position_m=[7.0, 2.0], yaw_rad=0.0,
+            linear_velocity_m_s=0.2, angular_velocity_rad_s=0.0,
+        ))
+        result = supervisor.process_sensor_reading(loc_spike)
+        self.assertFalse(result)
+        self.assertTrue(supervisor.safe_stop.is_stopped)
+        self.assertEqual(len(bus.messages_for("SAFE_STOP")), 1)
+
+    def test_cusum_detects_slow_creeping_drift(self) -> None:
+        supervisor, bus, control = sentry()
+        supervisor.cusum.alarm_threshold = 3.0
+        supervisor.cusum.warning_threshold = 1.5
+        supervisor.cusum.slack = 0.1
+
+        # Initialize at [1.0, 1.0]
+        init_odom = parse_packet(sensor_packet(
+            "ODOMETRY", 1, frame="map", position_m=[1.0, 1.0], yaw_rad=0.0,
+            linear_velocity_m_s=0.1, angular_velocity_rad_s=0.0,
+        ))
+        supervisor.process_sensor_reading(init_odom)
+
+        # Feed interleaved odometry (grounding robot at [1.0, 1.0]) and creeping localization [1.35, 1.0]
+        stopped = False
+        for seq in range(2, 25):
+            t = time.time() + (seq * 0.1)
+            odom_pkt = parse_packet(sensor_packet(
+                "ODOMETRY", seq * 2, frame="map", position_m=[1.0, 1.0], yaw_rad=0.0,
+                linear_velocity_m_s=0.0, angular_velocity_rad_s=0.0, timestamp=t,
+            ))
+            supervisor.process_sensor_reading(odom_pkt)
+
+            drift_loc = parse_packet(sensor_packet(
+                "LOCALIZATION", seq * 2 + 1, frame="map", position_m=[1.35, 1.0], yaw_rad=0.0,
+                linear_velocity_m_s=0.0, angular_velocity_rad_s=0.0, timestamp=t + 0.05,
+            ))
+            if not supervisor.process_sensor_reading(drift_loc):
+                stopped = True
+                break
+
+        self.assertTrue(stopped, "CUSUM cumulative drift detector must trigger containment on persistent offset")
+        self.assertTrue(supervisor.safe_stop.is_stopped)
+
+    def test_ekf_smooths_odometry_fusion(self) -> None:
+        supervisor, _, _ = sentry()
+        for seq in range(1, 10):
+            t = time.time() + (seq * 0.1)
+            base_x = 1.0 + (seq * 0.1)
+            noisy_x = base_x + (0.02 if seq % 2 == 0 else -0.02)
+            odom = parse_packet(sensor_packet(
+                "ODOMETRY", seq, frame="map", position_m=[noisy_x, 1.0], yaw_rad=0.0,
+                linear_velocity_m_s=1.0, angular_velocity_rad_s=0.0, timestamp=t,
+            ))
+            supervisor.process_sensor_reading(odom)
+
+        filtered_x, filtered_y = supervisor.filtered_position
+        self.assertAlmostEqual(filtered_y, 1.0, delta=0.05)
+        self.assertAlmostEqual(filtered_x, 1.9, delta=0.2)
+
 
 if __name__ == "__main__":
     unittest.main()

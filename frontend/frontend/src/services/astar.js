@@ -116,3 +116,54 @@ export function findPathAStar(startX, startY, endX, endY, imageData, width, heig
 
   return null; // No path found
 }
+
+/**
+ * Geographic wrapper around findPathAStar: converts lat/lng to image pixels,
+ * runs A*, and converts the resulting path back to [lat, lng] coordinates.
+ */
+export function findGeoAStarPath(
+  src,
+  dst,
+  imageData,
+  width,
+  height,
+  floorPlanScale = 100,
+  centerLat = 13.0600,
+  centerLng = 80.2800
+) {
+  if (!src || !dst || !imageData || !width || !height) return null;
+
+  const lat_diff = floorPlanScale / 111320;
+  const lng_diff = floorPlanScale / (111320 * Math.cos((centerLat * Math.PI) / 180));
+  const maxLat = centerLat + lat_diff / 2;
+  const minLng = centerLng - lng_diff / 2;
+
+  const startX = Math.round(((src[1] - minLng) / lng_diff) * width);
+  const startY = Math.round(((maxLat - src[0]) / lat_diff) * height);
+  const endX = Math.round(((dst[1] - minLng) / lng_diff) * width);
+  const endY = Math.round(((maxLat - dst[0]) / lat_diff) * height);
+
+  const rawPixels = imageData.data || imageData;
+  const pixelPath = findPathAStar(startX, startY, endX, endY, rawPixels, width, height);
+  if (!pixelPath || pixelPath.length === 0) return null;
+
+  const path = pixelPath.map((pt) => {
+    const lat = maxLat - (pt.y / height) * lat_diff;
+    const lng = minLng + (pt.x / width) * lng_diff;
+    return [lat, lng];
+  });
+
+  // Calculate path distance in meters
+  let totalDistM = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const dy = (path[i + 1][0] - path[i][0]) * 111320;
+    const dx = (path[i + 1][1] - path[i][1]) * 111320 * Math.cos((centerLat * Math.PI) / 180);
+    totalDistM += Math.hypot(dx, dy);
+  }
+
+  return {
+    path,
+    distance: totalDistM,
+    duration: totalDistM / 12 // ~45 km/h flight speed
+  };
+}

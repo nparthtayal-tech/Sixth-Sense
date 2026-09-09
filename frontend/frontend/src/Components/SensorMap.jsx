@@ -281,9 +281,12 @@ function MapController({ route, vehiclePosition, followVehicle, source, destinat
   // Fit bounds to Floor Plan and lock the camera
   useEffect(() => {
     if (envMode === "factory" && floorPlanUrl && floorPlanBounds) {
-      map.fitBounds(floorPlanBounds, { padding: [0, 0] });
-      map.setMaxBounds(floorPlanBounds);
-      map.setMinZoom(map.getBoundsZoom(floorPlanBounds, false));
+      const b = L.latLngBounds(floorPlanBounds);
+      map.fitBounds(b, { padding: [30, 30] });
+      // Allow slight panning around the floor plan with 35% padding
+      map.setMaxBounds(b.pad(0.35));
+      const targetZoom = Math.max(map.getBoundsZoom(b, false), 17);
+      map.setMinZoom(Math.max(15, targetZoom - 2));
     } else {
       map.setMaxBounds(null);
       map.setMinZoom(0);
@@ -295,17 +298,17 @@ function MapController({ route, vehiclePosition, followVehicle, source, destinat
     if (route && route.length > 1) {
       const bounds = L.latLngBounds(route);
       map.fitBounds(bounds, {
-        padding: [80, 80],
-        maxZoom: 16
+        padding: [60, 60],
+        maxZoom: envMode === "factory" ? 22 : 16
       });
     } else if (source && destination) {
       const bounds = L.latLngBounds([source, destination]);
       map.fitBounds(bounds, {
-        padding: [80, 80],
-        maxZoom: 15
+        padding: [60, 60],
+        maxZoom: envMode === "factory" ? 21 : 15
       });
     }
-  }, [route, source, destination, map]);
+  }, [route, source, destination, map, envMode]);
 
   // Smoothly follow vehicle when active
   useEffect(() => {
@@ -346,17 +349,23 @@ export default function SensorMap({
   onMapClick,
   onSourceDrag,
   onDestDrag,
-  onSpoofDrag
+  onSpoofDrag,
+  onFloorPlanUpload,
+  onLoadSampleBlueprint,
+  fileInputRef
 }) {
   const mapStyle = {
     height: "100%",
     width: "100%",
-    background: envMode === "factory" ? "#ffffff" : "#030a14",
+    background: envMode === "factory" ? "#0f172a" : "#030a14",
     cursor: selectionMode ? "crosshair" : "grab"
   };
   const center = useMemo(() => {
+    if (envMode === "factory") {
+      return vehiclePosition || source || destination || DEFAULT_CENTER;
+    }
     return vehiclePosition || source || destination || DEFAULT_CENTER;
-  }, [vehiclePosition, source, destination]);
+  }, [envMode, vehiclePosition, source, destination]);
 
   const droneIcon = useMemo(() => {
     return createDroneIcon(vehicleHeading, quarantined, recoveryActive, spoofing);
@@ -426,12 +435,21 @@ export default function SensorMap({
   }, [floorPlanScale]);
 
   return (
-    <div className="tactical-map-viewport">
+    <div 
+      className="tactical-map-viewport"
+      onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      onDrop={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (onFloorPlanUpload) onFloorPlanUpload(e);
+      }}
+    >
       {promptBanner}
 
       <MapContainer
         center={center}
         zoom={14}
+        maxZoom={22}
         scrollWheelZoom={true}
         zoomControl={false}
         className="full-leaflet-canvas"
@@ -450,14 +468,47 @@ export default function SensorMap({
           <ImageOverlay
             url={floorPlanUrl}
             bounds={floorPlanBounds}
-            opacity={0.85}
+            opacity={0.88}
           />
         )}
 
         {envMode === "factory" && !floorPlanUrl && (
-          <div style={{ position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)', zIndex: 1000, background: 'rgba(0,0,0,0.8)', padding: '20px', borderRadius: '10px', color: '#fff', border: '1px solid #00ff9d', textAlign: 'center' }}>
-             <h3>🏭 Factory Mode Active</h3>
-             <p>Please upload a floor plan image in the top control bar to begin tracking.</p>
+          <div style={{
+            position: 'absolute',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            zIndex: 1000,
+            background: 'rgba(15,23,42,0.94)',
+            padding: '28px 36px',
+            borderRadius: '12px',
+            color: '#fff',
+            border: '1.5px solid #00ff9d',
+            boxShadow: '0 12px 40px rgba(0,255,157,0.25)',
+            textAlign: 'center',
+            maxWidth: '460px'
+          }}>
+             <div style={{ fontSize: '32px', marginBottom: '8px' }}>🏭</div>
+             <h3 style={{ color: '#00ff9d', margin: '0 0 8px 0', fontSize: '18px' }}>Factory Indoor Flight Arena</h3>
+             <p style={{ color: '#cbd5e1', fontSize: '13px', margin: '0 0 16px 0', lineHeight: 1.5 }}>
+               Drag & drop any floor plan image anywhere onto this map, browse a file, or load the pre-configured 100m factory blueprint.
+             </p>
+             <div style={{ display: 'flex', gap: '12px', justifyContent: 'center' }}>
+               <button 
+                 type="button"
+                 onClick={() => fileInputRef?.current?.click()}
+                 style={{ background: '#00ff9d', color: '#090d16', border: 'none', padding: '9px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', fontSize: '12px' }}
+               >
+                 📥 Upload Floor Plan
+               </button>
+               <button 
+                 type="button"
+                 onClick={onLoadSampleBlueprint}
+                 style={{ background: '#1e293b', color: '#38bdf8', border: '1px solid #38bdf8', padding: '9px 18px', borderRadius: '6px', fontWeight: 'bold', cursor: 'pointer', fontSize: '12px' }}
+               >
+                 ⚡ Load Sample Plan
+               </button>
+             </div>
           </div>
         )}
 

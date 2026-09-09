@@ -15,6 +15,12 @@ __pycache__/
 venv/
 *.log
 
+# Environment & Secrets
+.env
+.env.*
+*.env
+*.env.local
+
 # IDE & OS
 .vscode/
 .idea/
