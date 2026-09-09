@@ -20,7 +20,10 @@ import {
   ChevronUp,
   ChevronDown,
   Trash2,
-  Crosshair
+  Crosshair,
+  Flame,
+  Terminal,
+  Wifi
 } from "lucide-react";
 
 import "./App.css";
@@ -42,6 +45,37 @@ import {
 } from "./services/floorPlanProcessor";
 
 const DETECTION_THRESHOLD = 95; // meters (Chi-Square / CUSUM gate)
+
+// Dynamic Ground Patrol Waypoints for AGV-OMEGA (patrolling ground sector corridors)
+const OMEGA_PATROL_WAYPOINTS = [
+  [13.0594, 80.2796],
+  [13.0601, 80.2809],
+  [13.06035, 80.28185], // Intersects Methane Plume zone!
+  [13.0598, 80.2824],
+  [13.0591, 80.2811]
+];
+
+// Active Environmental Hazards on the tactical map
+const INITIAL_ENVIRONMENTAL_HAZARDS = [
+  {
+    id: "hz-ch4-plume",
+    type: "CH4_GAS_LEAK",
+    title: "CH₄ METHANE PLUME",
+    pos: [13.0603, 80.2818],
+    radius: 65,
+    severity: "CRITICAL",
+    basePpm: 110.0
+  },
+  {
+    id: "hz-thermal-spot",
+    type: "THERMAL_HOTSPOT",
+    title: "THERMAL ANOMALY",
+    pos: [13.0593, 80.2787],
+    radius: 48,
+    severity: "HIGH",
+    tempC: 78.4
+  }
+];
 
 function distanceBetween(a, b) {
   if (!a || !b) return 0;
@@ -112,6 +146,20 @@ export default function App() {
   // Telemetry & UI Drawers
   const [routeLoading, setRouteLoading] = useState(false);
   const [alerts, setAlerts] = useState([]);
+
+  // Audit Log Helper (defined early to prevent TDZ ReferenceError in hooks)
+  const addAlert = useCallback((message, type = "info") => {
+    setAlerts((prev) => [
+      {
+        id: Date.now() + Math.random(),
+        message,
+        type,
+        time: new Date().toLocaleTimeString()
+      },
+      ...prev
+    ].slice(0, 30));
+  }, []);
+
   const [logExpanded, setLogExpanded] = useState(false);
   const [leftDockOpen, setLeftDockOpen] = useState(true);
   const [rightDockOpen, setRightDockOpen] = useState(true);
@@ -136,9 +184,36 @@ export default function App() {
   // Auto-Generated Graph Network State
   const [customNodes, setCustomNodes] = useState([]); // array of [lat, lng]
   const [customEdges, setCustomEdges] = useState([]); // array of [idxA, idxB]
+  const [manualWaypoints, setManualWaypoints] = useState([]); // array of user-clicked manual waypoints
+  const [factoryPhase, setFactoryPhase] = useState("draw_dots"); // "draw_dots", "connect_dots", or "ready"
+  const [selectedDotForEdge, setSelectedDotForEdge] = useState(null);
   const [aiMessage, setAiMessage] = useState("");
   const [isAiProcessing, setIsAiProcessing] = useState(false);
-  
+
+  // ── IoT Swarm Mesh State ─────────────────────────────────────────
+  const [swarmMode, setSwarmMode] = useState(true);
+  const [swarmPatrolActive, setSwarmPatrolActive] = useState(true);
+  const [swarmRobots, setSwarmRobots] = useState([]);
+  const [meshLinks, setMeshLinks] = useState([]);
+  const [sharedHazards, setSharedHazards] = useState([]);
+  const [environmentalHazards, setEnvironmentalHazards] = useState(INITIAL_ENVIRONMENTAL_HAZARDS);
+  const [swarmConsensusAlert, setSwarmConsensusAlert] = useState(null);
+  const [swarmDockOpen, setSwarmDockOpen] = useState(true);
+  const [iotPacketLog, setIotPacketLog] = useState([]);
+  const [cobotGasPpm, setCobotGasPpm] = useState(14.2);
+  const [cobotObstacleDist, setCobotObstacleDist] = useState(4.2);
+
+  // High-frequency autonomous swarm motion & telemetry refs
+  const betaAngleRef = useRef(0);
+  const betaPosRef = useRef([13.0608, 80.2809]);
+  const betaHeadingRef = useRef(45);
+  const omegaWpIdxRef = useRef(0);
+  const omegaPosRef = useRef(OMEGA_PATROL_WAYPOINTS[0]);
+  const omegaHeadingRef = useRef(90);
+  const packetSeqRef = useRef(1001);
+  const lastHazardBroadcastRef = useRef(0);
+  const lastPacketLogTimeRef = useRef(0);
+
   const collisionImageWidthRef = useRef(0);
   const collisionImageHeightRef = useRef(0);
   const floorPlanImageDataRef = useRef(null);
@@ -146,15 +221,301 @@ export default function App() {
   const fileInputRef = useRef(null);
   const [deepSeekKey, setDeepSeekKey] = useState(getDeepSeekApiKey());
 
-  // Wall Boundary & Obstacle Check Function
+  // Load Image Data for UI
+  useEffect(() => {
+    if (floorPlanUrl && envMode === "factory") {
+      const img = new Image();
+      img.onload = () => {
+        collisionImageWidthRef.current = img.width;
+        collisionImageHeightRef.current = img.height;
+      };
+      img.src = floorPlanUrl;
+    }
+  }, [floorPlanUrl, envMode]);
+
+  // Swarm Interactive Action Triggers
+  const triggerSimulatedGasSpike = () => {
+    const curOmega = omegaPosRef.current || [13.0601, 80.2809];
+    // Immediately center the methane plume directly onto AGV-OMEGA's current location!
+    setEnvironmentalHazards((prev) =>
+      prev.map((h) =>
+        h.id === "hz-ch4-plume"
+          ? { ...h, pos: [curOmega[0] + 0.00004, curOmega[1] + 0.00004], basePpm: 128.0 }
+          : h
+      )
+    );
+    addAlert("☣️ GAS LEAK INJECTED: Plume centered on AGV-OMEGA. Sniffer PPM will spike immediately!", "warning");
+  };
+
+  const triggerSwarmSpoofAttack = () => {
+    const alphaPos = vehiclePosition || source || [13.0600, 80.2800];
+    injectOrUpdateSpoofTarget([alphaPos[0] + 0.0016, alphaPos[1] + 0.0018]);
+    addAlert("⚡ SWARM BYZANTINE TEST: UAV-ALPHA spoofed! UAV-BETA & AGV-OMEGA will cross-check and isolate it.", "danger");
+  };
+
+  // ── Multi-Robot IoT Swarm Autonomous Simulation Engine ──
+  useEffect(() => {
+    if (!swarmMode) {
+      setSwarmRobots([]);
+      setMeshLinks([]);
+      setSharedHazards([]);
+      setSwarmConsensusAlert(null);
+      return;
+    }
+
+    const timer = setInterval(() => {
+      // 1. Advance UAV-BETA Orbital Patrol
+      if (swarmPatrolActive) {
+        betaAngleRef.current += 0.035 * simulationSpeed;
+        const centerLat = 13.0604;
+        const centerLng = 80.2806;
+        const nextBetaLat = centerLat + 0.00062 * Math.sin(betaAngleRef.current);
+        const nextBetaLng = centerLng + 0.00078 * Math.cos(betaAngleRef.current);
+        const prevBeta = betaPosRef.current || [centerLat, centerLng];
+        const nextBeta = [nextBetaLat, nextBetaLng];
+        betaHeadingRef.current = calculateBearing(prevBeta, nextBeta);
+        betaPosRef.current = nextBeta;
+      }
+
+      // 2. Advance AGV-OMEGA Ground Corridors
+      if (swarmPatrolActive) {
+        const targetWp = OMEGA_PATROL_WAYPOINTS[omegaWpIdxRef.current];
+        const curOmega = omegaPosRef.current || OMEGA_PATROL_WAYPOINTS[0];
+        const nextOmega = moveTowards(curOmega, targetWp, 0.00010 * simulationSpeed);
+        omegaHeadingRef.current = calculateBearing(curOmega, targetWp);
+        omegaPosRef.current = nextOmega;
+
+        if (distanceBetween(nextOmega, targetWp) < 14) {
+          omegaWpIdxRef.current = (omegaWpIdxRef.current + 1) % OMEGA_PATROL_WAYPOINTS.length;
+        }
+      }
+
+      // 3. Dynamic Environmental Hazard Sensing
+      const methaneHazard = environmentalHazards.find((h) => h.id === "hz-ch4-plume");
+      let currentGas = 12.0 + Math.sin(Date.now() / 1500) * 1.8;
+      if (methaneHazard && omegaPosRef.current) {
+        const distToPlume = distanceBetween(omegaPosRef.current, methaneHazard.pos);
+        if (distToPlume <= methaneHazard.radius) {
+          const intensity = 1.0 - distToPlume / methaneHazard.radius;
+          currentGas = Math.round(14 + intensity * 98 + (Math.random() * 4 - 2));
+
+          // Threshold Alert (> 45 PPM)
+          if (currentGas > 45 && Date.now() - lastHazardBroadcastRef.current > 4500) {
+            lastHazardBroadcastRef.current = Date.now();
+            const timeStr = new Date().toLocaleTimeString();
+            addAlert(
+              `🚨 AGV-OMEGA SENSOR ALERT: Methane Gas Plume Detected (${currentGas} PPM) at Sector B! Broadcast sent to swarm.`,
+              "danger"
+            );
+
+            setSharedHazards((prev) => {
+              if (prev.some((h) => h.hazard_type === "CH4_GAS_LEAK")) return prev;
+              return [
+                ...prev,
+                {
+                  hazard_type: "CH4_GAS_LEAK",
+                  reported_by: "AGV-OMEGA",
+                  position: methaneHazard.pos,
+                  details: `Toxic CH4 gas concentration: ${currentGas} PPM (Threshold: 45 PPM)`
+                }
+              ];
+            });
+
+            // Add immediate high-priority packet
+            setIotPacketLog((prev) => [
+              {
+                id: `pkt-${Date.now()}`,
+                time: timeStr,
+                type: "ALERT_BROADCAST",
+                sender: "AGV-OMEGA",
+                target: "SWARM_BROADCAST",
+                channel: "CH_11_802.15.4",
+                seq: packetSeqRef.current++,
+                rssi: -52,
+                payload: `HAZARD_DISCOVERY: CH4_GAS=${currentGas}ppm, LAT=${omegaPosRef.current[0].toFixed(5)}, LNG=${omegaPosRef.current[1].toFixed(5)}`
+              },
+              ...prev.slice(0, 24)
+            ]);
+          }
+        }
+      }
+      setCobotGasPpm(typeof currentGas === "number" ? Math.round(currentGas) : currentGas);
+      const curObstacle = +(3.8 + Math.sin(Date.now() / 1800) * 1.6).toFixed(1);
+      setCobotObstacleDist(curObstacle);
+
+      // 4. Update Swarm Fleet Array
+      const alphaPos = vehiclePosition || source || [13.0600, 80.2800];
+      const alphaReportedPos = spoofing && gpsPosition ? gpsPosition : alphaPos;
+      const isAlphaSpoofed = spoofing && (gpsDivergence > 15 || quarantined);
+
+      const robots = [
+        {
+          id: "UAV-ALPHA",
+          name: "UAV-ALPHA",
+          role: "drone",
+          position: alphaReportedPos,
+          heading: vehicleHeading,
+          battery: 88,
+          isSpoofed: isAlphaSpoofed,
+          isCompromised: isAlphaSpoofed,
+          status: isAlphaSpoofed
+            ? "CONSENSUS QUARANTINED"
+            : missionRunning
+            ? "CORRIDOR CRUISE"
+            : "HOVER PATROL",
+          sensors: {
+            gas: 12.4,
+            obstacle: 35.0,
+            gpsTrust: isAlphaSpoofed ? 0.15 : gpsTrust / 100
+          }
+        },
+        {
+          id: "UAV-BETA",
+          name: "UAV-BETA",
+          role: "drone",
+          position: betaPosRef.current || [13.0608, 80.2809],
+          heading: betaHeadingRef.current || 45,
+          battery: 93,
+          isSpoofed: false,
+          isCompromised: false,
+          status: isAlphaSpoofed
+            ? "CROSS-VALIDATING LEADER"
+            : swarmPatrolActive
+            ? "ORBITAL SCAN PATROL"
+            : "LOITER HOLD",
+          sensors: {
+            gas: 15.1,
+            obstacle: 19.5,
+            gpsTrust: 0.99
+          }
+        },
+        {
+          id: "AGV-OMEGA",
+          name: "AGV-OMEGA",
+          role: "cobot",
+          position: omegaPosRef.current || OMEGA_PATROL_WAYPOINTS[0],
+          heading: omegaHeadingRef.current || 90,
+          battery: 82,
+          isSpoofed: false,
+          isCompromised: false,
+          status:
+            currentGas > 45
+              ? "TOXIC PLUME DETECTED"
+              : isAlphaSpoofed
+              ? "GROUND ISOLATION ANCHOR"
+              : swarmPatrolActive
+              ? "GROUND AISLE RECON"
+              : "STATIONARY HOLD",
+          sensors: {
+            gas: typeof currentGas === "number" ? Math.round(currentGas) : currentGas,
+            obstacle: curObstacle,
+            gpsTrust: 1.0
+          }
+        }
+      ];
+      setSwarmRobots(robots);
+
+      // 5. Dynamic IoT Wireless Mesh Links (< 260m range)
+      const links = [];
+      for (let i = 0; i < robots.length; i++) {
+        for (let j = i + 1; j < robots.length; j++) {
+          const r1 = robots[i];
+          const r2 = robots[j];
+          const dist = distanceBetween(r1.position, r2.position);
+          if (dist <= 260) {
+            const isThreatLink = r1.isCompromised || r2.isCompromised;
+            const rssi = Math.round(-38.0 - 25 * Math.log10(Math.max(1, dist)));
+            links.push({
+              from: r1.name,
+              to: r2.name,
+              fromPos: r1.position,
+              toPos: r2.position,
+              distanceM: dist,
+              rssi: rssi,
+              status: isThreatLink ? "threat" : dist > 180 ? "warning" : "nominal"
+            });
+          }
+        }
+      }
+      setMeshLinks(links);
+
+      // 6. Byzantine Consensus State
+      if (isAlphaSpoofed) {
+        setSwarmConsensusAlert(
+          "🚨 SWARM CONSENSUS: UAV-ALPHA ISOLATED (CROSS-RANGING DISCREPANCY > 40m)"
+        );
+        setSharedHazards((prev) => {
+          if (prev.some((h) => h.hazard_type === "GPS_SPOOFING")) return prev;
+          return [
+            ...prev,
+            {
+              hazard_type: "GPS_SPOOFING",
+              reported_by: "UAV-BETA & AGV-OMEGA",
+              position: alphaReportedPos,
+              details: "Byzantine cross-check rejected UAV-ALPHA false coordinates"
+            }
+          ];
+        });
+      } else {
+        setSwarmConsensusAlert(null);
+      }
+
+      // 7. Periodic Live IoT P2P Packet Generation (every ~1.4s)
+      if (Date.now() - lastPacketLogTimeRef.current > 1400) {
+        lastPacketLogTimeRef.current = Date.now();
+        const timeStr = new Date().toLocaleTimeString();
+        const randNode = Math.random() > 0.5 ? "AGV-OMEGA" : "UAV-BETA";
+        const targetNode = randNode === "AGV-OMEGA" ? "UAV-ALPHA" : "AGV-OMEGA";
+        const payloadStr =
+          randNode === "AGV-OMEGA"
+            ? `GAS_PPM=${currentGas}, SONAR_DIST=${curObstacle}m, BATT=82%`
+            : `FLIR_TEMP=28.4C, LIDAR_ALT=38m, BATT=93%`;
+        const rssiVal = Math.round(-48 - Math.random() * 14);
+
+        setIotPacketLog((prev) => [
+          {
+            id: `pkt-${Date.now()}-${Math.random()}`,
+            time: timeStr,
+            type: "P2P_TELEMETRY",
+            sender: randNode,
+            target: targetNode,
+            channel: "CH_11_802.15.4",
+            seq: packetSeqRef.current++,
+            rssi: rssiVal,
+            payload: payloadStr
+          },
+          ...prev.slice(0, 24)
+        ]);
+      }
+    }, 140);
+
+    return () => clearInterval(timer);
+  }, [
+    swarmMode,
+    swarmPatrolActive,
+    simulationSpeed,
+    vehiclePosition,
+    vehicleHeading,
+    source,
+    spoofing,
+    gpsPosition,
+    gpsDivergence,
+    quarantined,
+    gpsTrust,
+    missionRunning,
+    environmentalHazards,
+    addAlert
+  ]);
+
+  // Wall Boundary Check Function (Only strictly checks image boundaries now, AI handles paths)
   const isWall = useCallback((lat, lng) => {
     if (envMode !== "factory") return false;
-    
+
     const centerLat = 13.0600;
     const centerLng = 80.2800;
     const lat_diff = floorPlanScale / 111320;
     const lng_diff = floorPlanScale / (111320 * Math.cos(centerLat * Math.PI / 180));
-    
+
     const minLat = centerLat - lat_diff / 2;
     const maxLat = centerLat + lat_diff / 2;
     const minLng = centerLng - lng_diff / 2;
@@ -183,22 +544,9 @@ export default function App() {
     return false;
   }, [envMode, floorPlanScale]);
 
-  // Audit Log Helper
-  const addAlert = useCallback((message, type = "info") => {
-    setAlerts((prev) => [
-      {
-        id: Date.now() + Math.random(),
-        message,
-        type,
-        time: new Date().toLocaleTimeString()
-      },
-      ...prev
-    ].slice(0, 30));
-  }, []);
-
-  // Compute a path along the Custom Graph (Dijkstra)
+  // Compute a path along the Custom Graph (A*)
   const computeGraphPath = useCallback((src, dst, nodes, edges) => {
-    if (nodes.length < 2) return null;
+    if (!src || !dst || nodes.length < 2 || edges.length === 0) return null;
 
     let closestSrcIdx = 0; let minSrcDist = Infinity;
     nodes.forEach((node, idx) => {
@@ -214,32 +562,48 @@ export default function App() {
 
     const adj = Array.from({ length: nodes.length }, () => []);
     edges.forEach(([u, v]) => {
+      // Ignore malformed edges rather than allowing an invalid map click to
+      // break route generation. A route must use only the drawn connections.
+      if (
+        !Number.isInteger(u) ||
+        !Number.isInteger(v) ||
+        u === v ||
+        !nodes[u] ||
+        !nodes[v]
+      ) return;
+
       const dist = distanceBetween(nodes[u], nodes[v]);
       adj[u].push({ target: v, weight: dist });
       adj[v].push({ target: u, weight: dist });
     });
 
-    const dists = Array(nodes.length).fill(Infinity);
+    const gScore = Array(nodes.length).fill(Infinity);
+    const fScore = Array(nodes.length).fill(Infinity);
     const prev = Array(nodes.length).fill(null);
-    dists[closestSrcIdx] = 0;
-    const pq = [{ node: closestSrcIdx, dist: 0 }];
+    gScore[closestSrcIdx] = 0;
+    fScore[closestSrcIdx] = distanceBetween(nodes[closestSrcIdx], nodes[closestDstIdx]);
 
-    while(pq.length > 0) {
-      pq.sort((a,b) => a.dist - b.dist);
-      const { node: u, dist: d } = pq.shift();
+    const pq = [{ node: closestSrcIdx, f: fScore[closestSrcIdx] }];
+
+    while (pq.length > 0) {
+      pq.sort((a, b) => a.f - b.f);
+      const { node: u } = pq.shift();
+
       if (u === closestDstIdx) break;
+
       adj[u].forEach(edge => {
         const v = edge.target;
-        const alt = d + edge.weight;
-        if (alt < dists[v]) {
-          dists[v] = alt;
+        const tentativeG = gScore[u] + edge.weight;
+        if (tentativeG < gScore[v]) {
+          gScore[v] = tentativeG;
+          fScore[v] = tentativeG + distanceBetween(nodes[v], nodes[closestDstIdx]);
           prev[v] = u;
-          pq.push({ node: v, dist: alt });
+          pq.push({ node: v, f: fScore[v] });
         }
       });
     }
 
-    if (dists[closestDstIdx] === Infinity) return null;
+    if (gScore[closestDstIdx] === Infinity) return null;
 
     const pathIdxs = [];
     let u = closestDstIdx;
@@ -248,16 +612,24 @@ export default function App() {
       u = prev[u];
     }
 
-    const finalPath = [src];
-    pathIdxs.forEach(idx => finalPath.push(nodes[idx]));
-    finalPath.push(dst);
+    const rawPath = [];
+    pathIdxs.forEach(idx => rawPath.push(nodes[idx]));
 
-    let dist = 0;
-    for(let i=0; i<finalPath.length-1; i++) {
-      dist += distanceBetween(finalPath[i], finalPath[i+1]);
+    // Interpolate the path so the robot moves smoothly
+    let densePath = [];
+    let totalDist = 0;
+    for (let i = 0; i < rawPath.length - 1; i++) {
+      const segment = generateAirCorridor(rawPath[i], rawPath[i + 1], 40);
+      let p = segment.path;
+      if (i > 0) p.shift(); // Avoid duplicating connection points
+      densePath = densePath.concat(p);
+      totalDist += segment.distance;
     }
 
-    return { path: finalPath, distance: dist, duration: dist / 12 };
+    // A start and destination on the same dot still need a valid route value.
+    if (densePath.length === 0) densePath = [rawPath[0]];
+
+    return { path: densePath, distance: totalDist, duration: totalDist / 12 };
   }, []);
 
   // Helper to compute indoor corridor route using A* or NavMesh Dijkstra
@@ -281,7 +653,7 @@ export default function App() {
     setRouteLoading(true);
     try {
       addAlert("Calculating flight path...", "info");
-      
+
       let result;
       if (envMode === "factory") {
         addAlert("Indoor Factory Mode: Computing route using AI-Generated NavMesh & A*...", "info");
@@ -508,28 +880,73 @@ export default function App() {
       return;
     }
 
+    // 🔥 Factory Mode Phase 1: Manual Waypoint Drawing 🔥
+    if (envMode === "factory" && factoryPhase === "draw_dots") {
+      setCustomNodes((prev) => [...prev, pos]);
+      addAlert(`Dot placed. Total dots: ${customNodes.length + 1}.`, "success");
+      return;
+    }
+
+    // 🔥 Factory Mode Phase 2: Connecting Dots 🔥
+    if (envMode === "factory" && factoryPhase === "connect_dots") {
+      if (customNodes.length < 2) return;
+
+      // Find the closest dot
+      let minDist = Infinity;
+      let closestIdx = -1;
+      customNodes.forEach((node, idx) => {
+        const d = distanceBetween(pos, node);
+        if (d < minDist) { minDist = d; closestIdx = idx; }
+      });
+
+      if (closestIdx === -1) return;
+
+      if (selectedDotForEdge === null) {
+        setSelectedDotForEdge(closestIdx);
+        addAlert("Dot selected. Click the next dot to connect them.", "info");
+      } else if (selectedDotForEdge === closestIdx) {
+        setSelectedDotForEdge(null);
+        addAlert("Dot deselected.", "info");
+      } else {
+        setCustomEdges((prev) => [...prev, [selectedDotForEdge, closestIdx]]);
+        setSelectedDotForEdge(closestIdx); // Automatically chain to the new dot!
+        addAlert("Connected! Click another dot to continue the chain.", "success");
+      }
+      return;
+    }
+
+    // Helper: Snap position to nearest custom node in factory mode Phase 2
+    let snappedPos = pos;
+    if (envMode === "factory" && factoryPhase === "ready" && customNodes.length > 0) {
+      let minDist = Infinity;
+      customNodes.forEach(node => {
+        const d = distanceBetween(pos, node);
+        if (d < minDist) { minDist = d; snappedPos = node; }
+      });
+    }
+
     // 1. If currently choosing Start:
     if (selectionMode === "start" || !source) {
-      setSource(pos);
-      setVehiclePosition(pos);
-      vehiclePosRef.current = pos;
-      setGpsPosition(pos);
-      gpsPosRef.current = pos;
+      setSource(snappedPos);
+      setVehiclePosition(snappedPos);
+      vehiclePosRef.current = snappedPos;
+      setGpsPosition(snappedPos);
+      gpsPosRef.current = snappedPos;
       setRoute([]);
       setRecoveryRoute([]);
-      setBreadcrumbTrail([pos]);
+      setBreadcrumbTrail([snappedPos]);
       setSelectionMode("dest");
       setSecurityState("SELECT DESTINATION");
-      addAlert(`Initial Start point set: [${pos[0].toFixed(4)}, ${pos[1].toFixed(4)}]. Now click for Final Destination.`, "success");
+      addAlert(`Start point snapped to node. Now click for Destination.`, "success");
       return;
     }
 
     // 2. If currently choosing Destination:
     if (selectionMode === "dest" || (!destination && source)) {
-      setDestination(pos);
+      setDestination(snappedPos);
       setSelectionMode(null);
-      addAlert(`Final Destination set: [${pos[0].toFixed(4)}, ${pos[1].toFixed(4)}].`, "success");
-      computeRoute(source, pos);
+      addAlert(`Final Destination snapped to node.`, "success");
+      computeRoute(source, snappedPos);
       return;
     }
 
@@ -566,7 +983,7 @@ export default function App() {
   };
 
   // Inject or Update Spoof Target at ANY time (like demo_animated_sentry)
-  const injectOrUpdateSpoofTarget = (targetPos) => {
+  function injectOrUpdateSpoofTarget(targetPos) {
     // 0. If return-to-start override is already active, reject any new targets
     if (overrideToStartRef.current) {
       addAlert("🛑 DESTINATION LOCKED TO START: High-frequency cyber attack confirmed (>5 spoofing in 5s). Drone goes ONLY towards starting point!", "danger");
@@ -720,6 +1137,7 @@ export default function App() {
     spoofTargetRef.current = null;
     setRecoveryRoute([]);
     recoveryRouteRef.current = [];
+    setManualWaypoints([]);
     routeIndexRef.current = 0;
     recoveryIndexRef.current = 0;
     setRiskScore(4);
@@ -770,10 +1188,10 @@ export default function App() {
 
     let returnCorridor;
     if (envMode === "factory") {
-       // Just draw a straight line but the physics engine isWall check will prevent it from going out of bounds
-       returnCorridor = generateAirCorridor(currentPos, startPt, 50);
+      // Just draw a straight line but the physics engine isWall check will prevent it from going out of bounds
+      returnCorridor = generateAirCorridor(currentPos, startPt, 50);
     } else {
-       returnCorridor = generateAirCorridor(currentPos, startPt, 50);
+      returnCorridor = generateAirCorridor(currentPos, startPt, 50);
     }
 
     setDestination(startPt);
@@ -828,10 +1246,10 @@ export default function App() {
 
       let recoveryResult;
       if (envMode === "factory") {
-         // Fallback to straight line for recovery, but physics engine will block walls
-         recoveryResult = { path: [currentPos, rejoinPoint] };
+        // Fallback to straight line for recovery, but physics engine will block walls
+        recoveryResult = { path: [currentPos, rejoinPoint] };
       } else {
-         recoveryResult = await getRecoveryRoute(currentPos, rejoinPoint);
+        recoveryResult = await getRecoveryRoute(currentPos, rejoinPoint);
       }
 
       const fullRecoveryPath = [...recoveryResult.path, ...route.slice(rejoinIdx)];
@@ -979,11 +1397,11 @@ export default function App() {
 
         // Pixel-Level Wall Collision Check for Spoofed Drifting
         if (isWall(deceivedStep[0], deceivedStep[1])) {
-           addAlert("💥 SPOOF COLLISION ALERT: Hijack drift blocked by wall or boundary!", "warning");
-           // Drone is physically blocked, but GPS still drifts!
+          addAlert("💥 SPOOF COLLISION ALERT: Hijack drift blocked by wall or boundary!", "warning");
+          // Drone is physically blocked, but GPS still drifts!
         } else {
-           vehiclePosRef.current = deceivedStep;
-           setVehiclePosition(deceivedStep);
+          vehiclePosRef.current = deceivedStep;
+          setVehiclePosition(deceivedStep);
         }
 
         setVehicleHeading(calculateBearing(curPos, target));
@@ -1046,11 +1464,11 @@ export default function App() {
 
       // Pixel-Level Wall Collision & Boundary Check
       if (isWall(nextPos[0], nextPos[1])) {
-         addAlert("💥 COLLISION ALERT: Flight path blocked by factory wall!", "danger");
-         setMissionRunning(false);
-         missionRunningRef.current = false;
-         setSecurityState("CRASH: WALL COLLISION");
-         return;
+        addAlert("💥 COLLISION ALERT: Flight path blocked by factory wall!", "danger");
+        setMissionRunning(false);
+        missionRunningRef.current = false;
+        setSecurityState("CRASH: WALL COLLISION");
+        return;
       }
 
       routeIndexRef.current = nextIndex;
@@ -1105,6 +1523,13 @@ export default function App() {
         onFloorPlanUpload={handleFloorPlanUpload}
         onLoadSampleBlueprint={handleLoadSampleFloorPlan}
         fileInputRef={fileInputRef}
+        manualWaypoints={manualWaypoints}
+        selectedDotForEdge={selectedDotForEdge}
+        swarmMode={swarmMode}
+        swarmRobots={swarmRobots}
+        meshLinks={meshLinks}
+        sharedHazards={sharedHazards}
+        environmentalHazards={environmentalHazards}
       />
 
       {/* ── 2. Floating Top Flight HUD Bar ─────────────────────────────── */}
@@ -1118,7 +1543,7 @@ export default function App() {
             <span className="hud-subtitle">ANTI-SPOOFING TACTICAL FLIGHT HUD</span>
           </div>
         </div>
-        
+
         {/* Environment Mode Switcher */}
         <div style={{ display: "flex", gap: "8px", alignItems: "center", background: "rgba(15,23,42,0.75)", padding: "4px 8px", borderRadius: "6px", border: "1px solid rgba(0,255,157,0.3)" }}>
           <select 
@@ -1257,6 +1682,15 @@ export default function App() {
         {/* Top Action Controls */}
         <div className="hud-top-actions">
           <button
+            className={`hud-icon-btn ${swarmMode ? "active swarm-btn-active" : ""}`}
+            onClick={() => setSwarmMode(!swarmMode)}
+            title="Toggle Decentralized IoT Swarm Mesh (Drones + Cobots Collaborative Perception)"
+          >
+            <RadioTower size={18} />
+            <span>{swarmMode ? "🌐 SWARM MESH [ON]" : "🌐 SWARM MESH"}</span>
+          </button>
+
+          <button
             className={`hud-icon-btn ${followVehicle ? "active" : ""}`}
             onClick={() => setFollowVehicle(!followVehicle)}
             title="Lock Camera on Drone vs Free Pan"
@@ -1330,6 +1764,19 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* ── Swarm Byzantine Consensus Threat Banner ─────────────────────── */}
+      {swarmMode && swarmConsensusAlert && (
+        <div className="hud-swarm-consensus-banner">
+          <AlertTriangle size={20} />
+          <div className="banner-text">
+            <strong>BYZANTINE SWARM CONSENSUS TRIGGERED</strong>
+            <span>{swarmConsensusAlert}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ── 3. Floating Left Mission & Attack Dock ──────────────────────── */}
       <aside className={`hud-floating-dock left ${leftDockOpen ? "open" : "collapsed"}`}>
         <div className="dock-header">
           <div className="dock-title">
@@ -1349,7 +1796,7 @@ export default function App() {
             {/* Custom On-Map Waypoint Pickers (Unprecoded!) */}
             <div className="dock-section">
               <label className="section-caption">CHOOSE INITIAL & FINAL DESTINATION</label>
-              
+
               <div className="waypoint-pick-card">
                 <div className={`pick-row ${selectionMode === "start" ? "active" : ""}`}>
                   <div className="pick-indicator start">S</div>
@@ -1502,6 +1949,132 @@ export default function App() {
 
         {rightDockOpen && (
           <div className="dock-content">
+            {/* IoT Swarm P2P Fleet Mesh Section */}
+            {swarmMode && (
+              <div className="dock-section swarm-fleet-section">
+                <div className="swarm-header-row">
+                  <label className="section-caption">
+                    <span className="live-dot-cyan"></span> IOT SWARM P2P MESH ({swarmRobots.length} NODES)
+                  </label>
+                  <span className={`swarm-patrol-status-pill ${swarmPatrolActive ? "active" : "paused"}`}>
+                    {swarmPatrolActive ? "AUTONOMOUS PATROL: ON" : "PATROL: PAUSED"}
+                  </span>
+                </div>
+
+                <div className="swarm-topology-bar">
+                  <span>TOPOLOGY: <strong>P2P 802.15.4 MESH</strong></span>
+                  <span>LINKS: <strong style={{ color: "#00ff9d" }}>{meshLinks.length}/3 ACTIVE</strong></span>
+                </div>
+
+                {/* Swarm Quick Interactive Action Controls */}
+                <div className="swarm-action-buttons-row">
+                  <button
+                    className={`swarm-act-btn ${swarmPatrolActive ? "active" : ""}`}
+                    onClick={() => setSwarmPatrolActive(!swarmPatrolActive)}
+                    title="Toggle autonomous movement for all robots"
+                  >
+                    {swarmPatrolActive ? <Pause size={12} /> : <Play size={12} />}
+                    <span>{swarmPatrolActive ? "PAUSE PATROL" : "START PATROL"}</span>
+                  </button>
+
+                  <button
+                    className="swarm-act-btn hazard-btn"
+                    onClick={triggerSimulatedGasSpike}
+                    title="Center methane gas plume onto AGV-OMEGA to immediately test sensor spike & broadcast"
+                  >
+                    <Flame size={12} />
+                    <span>SIMULATE GAS SPIKE</span>
+                  </button>
+
+                  <button
+                    className="swarm-act-btn spoof-btn"
+                    onClick={triggerSwarmSpoofAttack}
+                    title="Spoof UAV-ALPHA to trigger peer Byzantine cross-check"
+                  >
+                    <Zap size={12} />
+                    <span>SPOOF UAV-ALPHA</span>
+                  </button>
+                </div>
+
+                {/* Swarm Dynamic Robots Cards */}
+                <div className="swarm-nodes-container">
+                  {swarmRobots.map((robot) => (
+                    <div key={robot.id} className={`swarm-node-item ${robot.isCompromised ? "compromised" : robot.sensors.gas > 40 ? "hazard-alert" : ""}`}>
+                      <div className="node-item-header">
+                        <div className="node-title">
+                          <span className={`node-badge ${robot.role}`}>{robot.role === "cobot" ? "🤖 COBOT" : "🚁 UAV"}</span>
+                          <strong>{robot.name}</strong>
+                        </div>
+                        <span className={`node-status-tag ${robot.isCompromised ? "danger" : robot.sensors.gas > 40 ? "hazard" : "ok"}`}>
+                          {robot.isCompromised ? "SPOOF QUARANTINED" : robot.sensors.gas > 40 ? "GAS ALERT" : "ACTIVE"}
+                        </span>
+                      </div>
+                      <div className="node-mini-metrics">
+                        <div>BATTERY: <strong>{robot.battery}%</strong></div>
+                        <div>GPS TRUST: <strong style={{ color: robot.sensors.gpsTrust < 0.5 ? '#f43f5e' : '#00ff9d' }}>{(robot.sensors.gpsTrust * 100).toFixed(0)}%</strong></div>
+                        {robot.sensors.gas !== undefined && (
+                          <div>
+                            GAS: <strong style={{ color: robot.sensors.gas > 40 ? '#f43f5e' : '#f59e0b', fontWeight: 'bold' }}>
+                              {robot.sensors.gas} ppm {robot.sensors.gas > 40 ? "⚠️" : ""}
+                            </strong>
+                          </div>
+                        )}
+                        {robot.sensors.obstacle !== undefined && <div>OBSTACLE: <strong>{robot.sensors.obstacle} m</strong></div>}
+                      </div>
+                      <div className="node-mission-status">
+                        ROLE: <span>{robot.status}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Live IoT P2P Serialized Packet Stream Terminal */}
+                <div className="iot-packet-terminal">
+                  <div className="terminal-header">
+                    <div className="terminal-title">
+                      <Terminal size={12} />
+                      <span>LIVE IOT P2P PACKET STREAM (802.15.4)</span>
+                    </div>
+                    <span className="terminal-stats">TX: 3.8 kB/s | LOSS: 0%</span>
+                  </div>
+                  <div className="terminal-body" id="iot-packet-stream">
+                    {iotPacketLog.length === 0 ? (
+                      <div className="term-line info">Waiting for P2P mesh handshake packets...</div>
+                    ) : (
+                      iotPacketLog.map((pkt) => (
+                        <div key={pkt.id} className={`term-packet-line ${pkt.type.toLowerCase()}`}>
+                          <span className="pkt-time">[{pkt.time}]</span>
+                          <span className="pkt-seq">#{pkt.seq}</span>
+                          <span className="pkt-route">{pkt.sender} ➔ {pkt.target}</span>
+                          <span className="pkt-rssi">{pkt.rssi}dBm</span>
+                          <span className="pkt-payload">{pkt.payload}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Shared Swarm Hazard Registry */}
+                {sharedHazards.length > 0 && (
+                  <div className="swarm-hazards-registry">
+                    <div className="registry-title">
+                      <AlertTriangle size={13} color="#f43f5e" />
+                      <span>SHARED HAZARD LEDGER ({sharedHazards.length})</span>
+                    </div>
+                    {sharedHazards.map((hz, idx) => (
+                      <div key={`hz-reg-${idx}`} className="hazard-ledger-item">
+                        <div className="hz-reg-head">
+                          <strong>{hz.hazard_type}</strong>
+                          <span>By: {hz.reported_by}</span>
+                        </div>
+                        <div className="hz-reg-details">{hz.details}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Risk & Threat Gauge */}
             <div className="threat-gauge-card">
               <div className="gauge-header">
@@ -1598,6 +2171,12 @@ export default function App() {
               <span className="legend-item"><span className="legend-dot route"></span> Authorized Route</span>
               <span className="legend-item"><span className="legend-dot recovery"></span> Rejoin Path</span>
               <span className="legend-item"><span className="legend-dot beacon"></span> Rogue Beacon</span>
+              {swarmMode && (
+                <>
+                  <span className="legend-item"><span className="legend-dot swarm-link"></span> IoT Mesh Link</span>
+                  <span className="legend-item"><span className="legend-dot cobot"></span> Ground Cobot</span>
+                </>
+              )}
             </div>
 
             <button className="expand-log-btn" onClick={() => setLogExpanded(!logExpanded)}>

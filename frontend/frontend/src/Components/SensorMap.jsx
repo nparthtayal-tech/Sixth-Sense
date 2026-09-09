@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   MapContainer,
   TileLayer,
@@ -8,6 +8,7 @@ import {
   Polyline,
   Polygon,
   Circle,
+  CircleMarker,
   useMap,
   useMapEvents
 } from "react-leaflet";
@@ -86,6 +87,169 @@ function createDroneIcon(heading = 0, quarantined = false, recovery = false, spo
     `,
     iconSize: [52, 52],
     iconAnchor: [26, 26]
+  });
+}
+
+function createCobotIcon(label = "AGV-COBOT", heading = 0, isSpoofed = false, isCompromised = false) {
+  const color = isCompromised || isSpoofed ? "#f43f5e" : "#f59e0b";
+  const glow = isCompromised || isSpoofed ? "rgba(244, 63, 94, 0.9)" : "rgba(245, 158, 11, 0.85)";
+
+  return new L.DivIcon({
+    className: "cobot-leaflet-icon",
+    html: `
+      <div style="
+        width: 48px;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        transform: rotate(${heading}deg);
+        transition: transform 0.25s ease-out;
+      ">
+        <div style="
+          position: absolute;
+          inset: -3px;
+          border-radius: 8px;
+          border: 1.5px dashed ${color};
+          opacity: 0.8;
+          animation: spinDroneRing 6s linear infinite;
+        "></div>
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+          <rect x="8" y="10" width="24" height="20" rx="4" fill="#0f172a" stroke="${color}" stroke-width="2.5" style="filter: drop-shadow(0 0 8px ${glow});" />
+          <rect x="4" y="13" width="4" height="14" rx="2" fill="${color}" />
+          <rect x="32" y="13" width="4" height="14" rx="2" fill="${color}" />
+          <polygon points="20,13 15,21 25,21" fill="${color}" />
+          <circle cx="20" cy="24" r="3.5" fill="#ffffff" />
+        </svg>
+        <div style="
+          position: absolute;
+          bottom: -18px;
+          left: 50%;
+          transform: translateX(-50%);
+          background: rgba(15, 23, 42, 0.95);
+          border: 1px solid ${color};
+          color: ${color};
+          font-size: 8px;
+          font-weight: 800;
+          letter-spacing: 0.6px;
+          padding: 1px 5px;
+          border-radius: 3px;
+          white-space: nowrap;
+          box-shadow: 0 0 8px ${glow};
+        ">${label}</div>
+      </div>
+    `,
+    iconSize: [48, 48],
+    iconAnchor: [24, 24]
+  });
+}
+
+function createSwarmDroneIcon(label = "UAV-SWARM", heading = 0, isSpoofed = false, isCompromised = false) {
+  const color = isCompromised ? "#f43f5e" : isSpoofed ? "#f43f5e" : "#22d3ee";
+  const glow = isCompromised || isSpoofed ? "rgba(244, 63, 94, 0.9)" : "rgba(34, 211, 238, 0.85)";
+
+  return new L.DivIcon({
+    className: "swarm-drone-leaflet-icon",
+    html: `
+      <div style="
+        width: 48px;
+        height: 48px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        transform: rotate(${heading}deg);
+        transition: transform 0.25s ease-out;
+      ">
+        <div style="
+          position: absolute;
+          inset: -4px;
+          border-radius: 50%;
+          border: 1.5px dashed ${color};
+          opacity: 0.75;
+          animation: spinDroneRing 5s linear infinite;
+        "></div>
+        <svg width="42" height="42" viewBox="0 0 48 48" fill="none">
+          <circle cx="24" cy="24" r="7" fill="${color}" style="filter: drop-shadow(0 0 8px ${glow});"/>
+          <line x1="10" y1="10" x2="38" y2="38" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+          <line x1="38" y1="10" x2="10" y2="38" stroke="${color}" stroke-width="2.5" stroke-linecap="round"/>
+          <circle cx="10" cy="10" r="4" fill="#061224" stroke="${color}" stroke-width="1.8"/>
+          <circle cx="38" cy="10" r="4" fill="#061224" stroke="${color}" stroke-width="1.8"/>
+          <circle cx="10" cy="38" r="4" fill="#061224" stroke="${color}" stroke-width="1.8"/>
+          <circle cx="38" cy="38" r="4" fill="#061224" stroke="${color}" stroke-width="1.8"/>
+          <polygon points="24,10 20,19 28,19" fill="#ffffff"/>
+        </svg>
+        <div style="
+          position: absolute;
+          bottom: -18px;
+          left: 50%;
+          transform: translateX(-50%);
+          background: rgba(3, 10, 22, 0.95);
+          border: 1.2px solid ${color};
+          color: ${color};
+          font-size: 8px;
+          font-weight: 800;
+          letter-spacing: 0.6px;
+          padding: 1px 5px;
+          border-radius: 3px;
+          white-space: nowrap;
+          box-shadow: 0 0 8px ${glow};
+        ">${label}</div>
+      </div>
+    `,
+    iconSize: [48, 48],
+    iconAnchor: [24, 24]
+  });
+}
+
+function createHazardSiteIcon(type = "CH4_GAS_LEAK", label = "HAZARD") {
+  const isGas = type.includes("GAS") || type.includes("CH4");
+  const color = isGas ? "#f59e0b" : "#ef4444";
+  const iconEmoji = isGas ? "☣️" : "🔥";
+  return new L.DivIcon({
+    className: "hazard-site-icon",
+    html: `
+      <div style="
+        width: 42px;
+        height: 48px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        cursor: pointer;
+      ">
+        <div style="
+          width: 32px;
+          height: 32px;
+          border-radius: 50%;
+          background: rgba(15, 23, 42, 0.92);
+          border: 2px solid ${color};
+          box-shadow: 0 0 14px ${color};
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 15px;
+          animation: pulseGlowRed 1.8s ease-in-out infinite;
+        ">${iconEmoji}</div>
+        <div style="
+          margin-top: 2px;
+          background: rgba(15, 23, 42, 0.95);
+          border: 1px solid ${color};
+          color: ${color};
+          font-size: 7.5px;
+          font-weight: 800;
+          padding: 1px 4px;
+          border-radius: 3px;
+          white-space: nowrap;
+          letter-spacing: 0.5px;
+          box-shadow: 0 0 6px rgba(0,0,0,0.8);
+        ">${label}</div>
+      </div>
+    `,
+    iconSize: [42, 48],
+    iconAnchor: [21, 24]
   });
 }
 
@@ -346,14 +510,23 @@ export default function SensorMap({
   floorPlanScale = 100,
   customNodes = [],
   customEdges = [],
+  manualWaypoints = [],
+  selectedDotForEdge = null,
   onMapClick,
   onSourceDrag,
   onDestDrag,
   onSpoofDrag,
   onFloorPlanUpload,
   onLoadSampleBlueprint,
-  fileInputRef
+  fileInputRef,
+  swarmMode = false,
+  swarmRobots = [],
+  meshLinks = [],
+  sharedHazards = [],
+  environmentalHazards = []
 }) {
+  const [basemapStyle, setBasemapStyle] = useState("tactical"); // 'tactical' | 'satellite'
+
   const mapStyle = {
     height: "100%",
     width: "100%",
@@ -446,6 +619,27 @@ export default function SensorMap({
     >
       {promptBanner}
 
+      {envMode === "outdoor" && (
+        <div className="tactical-layer-control">
+          <button
+            type="button"
+            className={`layer-btn ${basemapStyle === "tactical" ? "active" : ""}`}
+            onClick={() => setBasemapStyle("tactical")}
+            title="Dark Cyber Tactical Mode (Watermark-Free)"
+          >
+            🛰️ Tactical Dark
+          </button>
+          <button
+            type="button"
+            className={`layer-btn ${basemapStyle === "satellite" ? "active" : ""}`}
+            onClick={() => setBasemapStyle("satellite")}
+            title="High-Res Aerial Satellite (Watermark-Free)"
+          >
+            🌍 Satellite
+          </button>
+        </div>
+      )}
+
       <MapContainer
         center={center}
         zoom={14}
@@ -455,12 +649,22 @@ export default function SensorMap({
         className="full-leaflet-canvas"
         style={mapStyle}
       >
-        {envMode === "outdoor" && (
+        {envMode === "outdoor" && basemapStyle === "tactical" && (
           <TileLayer
-            attribution='&copy; <a href="https://carto.com/">CARTO</a> | &copy; OpenStreetMap'
-            url="https://{s}.basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}{r}.png"
-            subdomains="abcd"
-            maxZoom={20}
+            key="osm-tactical"
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            className="tactical-dark-tiles"
+            maxZoom={19}
+          />
+        )}
+
+        {envMode === "outdoor" && basemapStyle === "satellite" && (
+          <TileLayer
+            key="esri-satellite"
+            attribution='Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
+            url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+            maxZoom={19}
           />
         )}
 
@@ -606,27 +810,33 @@ export default function SensorMap({
           />
         )}
 
-        {/* AI-Generated NavMesh Rendering */}
+        {/* Manual Dots Rendering */}
         {envMode === "factory" && customNodes && customNodes.map((node, idx) => (
            <Circle
-             key={`ai-node-${idx}`}
+             key={`custom-node-${idx}`}
              center={node}
-             radius={0.8}
-             pathOptions={{ color: "#00bfff", fillColor: "#00bfff", fillOpacity: 0.8 }}
+             radius={selectedDotForEdge === idx ? 1.5 : 0.8}
+             pathOptions={{ 
+               color: selectedDotForEdge === idx ? "#ef4444" : "#facc15", 
+               fillColor: selectedDotForEdge === idx ? "#ef4444" : "#facc15", 
+               fillOpacity: 0.9 
+             }}
              interactive={false}
            />
         ))}
 
+        {/* Manual Edges Rendering */}
         {envMode === "factory" && customEdges && customEdges.map((edge, idx) => {
            const n1 = customNodes[edge[0]];
            const n2 = customNodes[edge[1]];
            if (!n1 || !n2) return null;
            return (
              <Polyline
-               key={`ai-edge-${idx}`}
+               key={`custom-edge-${idx}`}
                positions={[n1, n2]}
-               color="rgba(0, 191, 255, 0.3)"
+               color="rgba(250, 204, 21, 0.4)"
                weight={1.5}
+               dashArray="3 3"
                interactive={false}
              />
            );
@@ -755,6 +965,155 @@ export default function SensorMap({
             }}
           />
         )}
+
+        {/* ── Active Environmental Hazard Zones (Plumes & Spikes) ── */}
+        {swarmMode && environmentalHazards && environmentalHazards.map((hz) => {
+          const isGas = hz.type.includes("GAS") || hz.type.includes("CH4");
+          const plumeColor = isGas ? "#f59e0b" : "#ef4444";
+          return (
+            <React.Fragment key={hz.id}>
+              {/* Outer Dissipation Plume */}
+              <Circle
+                center={hz.pos}
+                radius={hz.radius}
+                pathOptions={{
+                  color: plumeColor,
+                  fillColor: plumeColor,
+                  fillOpacity: 0.12,
+                  weight: 1.5,
+                  dashArray: "6 6"
+                }}
+              />
+              {/* Inner High-Density Core */}
+              <Circle
+                center={hz.pos}
+                radius={Math.round(hz.radius * 0.45)}
+                pathOptions={{
+                  color: plumeColor,
+                  fillColor: plumeColor,
+                  fillOpacity: 0.28,
+                  weight: 2
+                }}
+              />
+              {/* Hazard Warning Pin */}
+              <Marker position={hz.pos} icon={createHazardSiteIcon(hz.type, hz.title)}>
+                <Popup className="tactical-popup">
+                  <strong style={{ color: plumeColor }}>⚠️ {hz.title}</strong><br />
+                  Severity: <strong style={{ color: "#f43f5e" }}>{hz.severity}</strong><br />
+                  {hz.basePpm && <>Peak Concentration: <strong>{hz.basePpm} PPM</strong><br /></>}
+                  {hz.tempC && <>Hotspot Temp: <strong>{hz.tempC} °C</strong><br /></>}
+                  Effective Radius: <strong>{hz.radius}m</strong><br />
+                  <small style={{ color: "#38bdf8" }}>Swarm cobots entering perimeter actively detect and broadcast telemetry alerts.</small>
+                </Popup>
+              </Marker>
+            </React.Fragment>
+          );
+        })}
+
+        {/* ── Autonomous Robot Dynamic Sensor Scan Cones & Footprints ── */}
+        {swarmMode && swarmRobots && swarmRobots.map((robot) => {
+          if (robot.role === "cobot" && robot.position) {
+            const isSpike = (robot.sensors?.gas || 0) > 40;
+            return (
+              <Circle
+                key={`sniffer-${robot.id}`}
+                center={robot.position}
+                radius={isSpike ? 24 : 18}
+                pathOptions={{
+                  color: isSpike ? "#f43f5e" : "#10b981",
+                  fillColor: isSpike ? "#f43f5e" : "#10b981",
+                  fillOpacity: isSpike ? 0.28 : 0.08,
+                  weight: isSpike ? 2.5 : 1.2,
+                  dashArray: isSpike ? "3 3" : "4 4"
+                }}
+              />
+            );
+          }
+          if (robot.role === "drone" && robot.id === "UAV-BETA" && robot.position) {
+            return (
+              <Circle
+                key={`radar-${robot.id}`}
+                center={robot.position}
+                radius={48}
+                pathOptions={{
+                  color: "#22d3ee",
+                  fillColor: "#22d3ee",
+                  fillOpacity: 0.07,
+                  weight: 1.2,
+                  dashArray: "6 6"
+                }}
+              />
+            );
+          }
+          return null;
+        })}
+
+        {/* ── IoT Multi-Robot Swarm Mesh Links ────────────────────── */}
+        {swarmMode && meshLinks && meshLinks.map((link, idx) => (
+          <Polyline
+            key={`mesh-link-${idx}`}
+            positions={[link.fromPos, link.toPos]}
+            pathOptions={{
+              color: link.status === "threat" ? "#f43f5e" : link.status === "warning" ? "#f59e0b" : "#22d3ee",
+              weight: link.status === "threat" ? 3.5 : 2.5,
+              dashArray: "6 8",
+              opacity: 0.85,
+            }}
+          >
+            <Popup className="tactical-popup">
+              <strong style={{ color: link.status === "threat" ? "#f43f5e" : "#22d3ee" }}>
+                📡 P2P IoT MESH LINK
+              </strong><br />
+              {link.from} ⟷ {link.to}<br />
+              Signal: <strong>{link.rssi} dBm</strong> (Dist: {Math.round(link.distanceM)}m)<br />
+              Status: <strong>{link.status.toUpperCase()}</strong>
+            </Popup>
+          </Polyline>
+        ))}
+
+        {/* ── IoT Swarm Collective Hazard Markers ───────────────────── */}
+        {swarmMode && sharedHazards && sharedHazards.map((hazard, idx) => (
+          <CircleMarker
+            key={`hazard-${idx}`}
+            center={hazard.position}
+            radius={10}
+            pathOptions={{
+              color: hazard.hazard_type === "GPS_SPOOFING" ? "#f43f5e" : "#f59e0b",
+              fillColor: hazard.hazard_type === "GPS_SPOOFING" ? "#f43f5e" : "#f59e0b",
+              fillOpacity: 0.7,
+              weight: 2,
+            }}
+          >
+            <Popup className="tactical-popup">
+              <strong style={{ color: "#f43f5e" }}>🚨 COLLECTIVE HAZARD DETECTED</strong><br />
+              Type: {hazard.hazard_type}<br />
+              Reported By: {hazard.reported_by}<br />
+              Details: {hazard.details || "Discrepancy reported"}
+            </Popup>
+          </CircleMarker>
+        ))}
+
+        {/* ── IoT Swarm Multi-Robot Markers ────────────────────────── */}
+        {swarmMode && swarmRobots && swarmRobots.map((robot) => {
+          const icon = robot.role === "cobot"
+            ? createCobotIcon(robot.name, robot.heading || 0, robot.isSpoofed, robot.isCompromised)
+            : createSwarmDroneIcon(robot.name, robot.heading || 0, robot.isSpoofed, robot.isCompromised);
+
+          return (
+            <Marker key={robot.id} position={robot.position} icon={icon} zIndexOffset={950}>
+              <Popup className="tactical-popup">
+                <strong style={{ color: robot.isCompromised ? "#f43f5e" : "#00ff9d" }}>
+                  {robot.name} [{robot.role.toUpperCase()}]
+                </strong><br />
+                Battery: <strong>{robot.battery}%</strong><br />
+                {robot.sensors?.gas !== undefined && <>Gas PPM: <strong>{robot.sensors.gas}</strong><br /></>}
+                {robot.sensors?.obstacle !== undefined && <>Nearest Obstacle: <strong>{robot.sensors.obstacle}m</strong><br /></>}
+                GPS Trust: <strong>{((robot.sensors?.gpsTrust ?? 1) * 100).toFixed(0)}%</strong><br />
+                Swarm Status: <span style={{ color: robot.isCompromised ? "#f43f5e" : "#22d3ee", fontWeight: "bold" }}>{robot.status}</span>
+              </Popup>
+            </Marker>
+          );
+        })}
       </MapContainer>
     </div>
   );
