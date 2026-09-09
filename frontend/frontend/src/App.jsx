@@ -33,14 +33,6 @@ import { getRoute, getRecoveryRoute, generateAirCorridor } from "./services/rout
 import { findPathAStar, findGeoAStarPath } from "./services/astar";
 import { MISSION_PRESETS, calculateBearing } from "./services/presets";
 import {
-  analyzeFloorPlanWithAI,
-  getDeepSeekApiKey,
-  setDeepSeekApiKey,
-  DEFAULT_DEEPSEEK_API_KEY
-} from "./services/aiVision";
-import {
-  extractNavMeshFromImage,
-  createSampleFactoryFloorPlan,
   checkPixelWall
 } from "./services/floorPlanProcessor";
 
@@ -219,7 +211,6 @@ export default function App() {
   const floorPlanImageDataRef = useRef(null);
   const floorPlanDarkIsWallRef = useRef(true);
   const fileInputRef = useRef(null);
-  const [deepSeekKey, setDeepSeekKey] = useState(getDeepSeekApiKey());
 
   // Load Image Data for UI
   useEffect(() => {
@@ -632,21 +623,6 @@ export default function App() {
     return { path: densePath, distance: totalDist, duration: totalDist / 12 };
   }, []);
 
-  // Helper to compute indoor corridor route using A* or NavMesh Dijkstra
-  const computeIndoorCorridorRoute = useCallback((src, dst, nodes, edges, imgData, w, h, scale) => {
-    let pathResult = null;
-    if (imgData && w && h) {
-      pathResult = findGeoAStarPath(src, dst, imgData, w, h, scale);
-    }
-    if (!pathResult && nodes && edges && nodes.length >= 2) {
-      pathResult = computeGraphPath(src, dst, nodes, edges);
-    }
-    if (!pathResult) {
-      pathResult = generateAirCorridor(src, dst, 35);
-    }
-    return pathResult;
-  }, [computeGraphPath]);
-
   // Compute Route between source and destination
   const computeRoute = useCallback(async (src, dst) => {
     if (!src || !dst) return;
@@ -656,18 +632,19 @@ export default function App() {
 
       let result;
       if (envMode === "factory") {
-        addAlert("Indoor Factory Mode: Computing route using AI-Generated NavMesh & A*...", "info");
-        result = computeIndoorCorridorRoute(
-          src,
-          dst,
-          customNodes,
-          customEdges,
-          floorPlanImageDataRef.current,
-          collisionImageWidthRef.current,
-          collisionImageHeightRef.current,
-          floorPlanScale
-        );
-        addAlert(`✅ DeepSeek / NavMesh Corridor Path ready: ${result.distance.toFixed(1)} m. Obstacles avoided.`, "success");
+        addAlert("Indoor Factory Mode: Computing route through the manual dotted network...", "info");
+        const graphResult = computeGraphPath(src, dst, customNodes, customEdges);
+        if (graphResult) {
+          result = graphResult;
+          addAlert("✅ Manual graph path found. The UAV will follow the connected yellow segments.", "success");
+        } else {
+          setRoute([]);
+          setDistance(null);
+          setDuration(null);
+          setSecurityState("CONNECT NAVMESH");
+          addAlert("❌ No connected dotted path exists between Start and Destination. Connect the selected dots, then try again.", "warning");
+          return;
+        }
       } else {
         result = await getRoute(src, dst);
       }
@@ -706,116 +683,14 @@ export default function App() {
     } finally {
       setRouteLoading(false);
     }
-  }, [addAlert, envMode, floorPlanScale, customNodes, customEdges, computeIndoorCorridorRoute]);
+  }, [addAlert, computeGraphPath, customEdges, customNodes, envMode]);
 
   // Initial welcome message
   useEffect(() => {
     addAlert("Ready: Click anywhere on the map to place your INITIAL START point.", "info");
   }, [addAlert]);
 
-  // Unified Floor Plan Processing & AI Analysis Pipeline
-  const processLoadedFloorPlan = useCallback(async (imageSrc, fileName = "Floor Plan") => {
-    setIsAiProcessing(true);
-    setEnvMode("factory");
-    addAlert(`Loading factory floor plan: ${fileName}...`, "info");
-
-    const img = new Image();
-    // Only set crossOrigin on remote URLs, NEVER on data: or blob:
-    if (imageSrc.startsWith("http:") || imageSrc.startsWith("https:")) {
-      img.crossOrigin = "anonymous";
-    }
-
-    img.onload = async () => {
-      try {
-        collisionImageWidthRef.current = img.width;
-        collisionImageHeightRef.current = img.height;
-
-        // 1. Run Local Computer Vision & NavMesh Corridor Extraction
-        const navmesh = extractNavMeshFromImage(img, floorPlanScale);
-        floorPlanImageDataRef.current = navmesh.imageData;
-        floorPlanDarkIsWallRef.current = navmesh.darkIsWall;
-        collisionImageWidthRef.current = navmesh.width;
-        collisionImageHeightRef.current = navmesh.height;
-
-        setCustomNodes(navmesh.nodes);
-        setCustomEdges(navmesh.edges);
-
-        addAlert(`✅ Local Vision Engine: Identified ${navmesh.nodes.length} corridor waypoints & ${navmesh.edges.length} air corridors.`, "success");
-
-        // 2. Set default start and destination inside valid corridor nodes
-        if (navmesh.nodes.length >= 2) {
-          const firstNode = navmesh.nodes[0];
-          const lastNode = navmesh.nodes[navmesh.nodes.length - 1];
-          setSource(firstNode);
-          setVehiclePosition(firstNode);
-          vehiclePosRef.current = firstNode;
-          setGpsPosition(firstNode);
-          gpsPosRef.current = firstNode;
-          setDestination(lastNode);
-          setSelectionMode(null);
-          setBreadcrumbTrail([firstNode]);
-
-          // Compute route immediately with extracted navmesh
-          const pathResult = computeIndoorCorridorRoute(
-            firstNode,
-            lastNode,
-            navmesh.nodes,
-            navmesh.edges,
-            navmesh.imageData,
-            navmesh.width,
-            navmesh.height,
-            floorPlanScale
-          );
-
-          setRoute(pathResult.path);
-          setDistance(pathResult.distance);
-          setDuration(pathResult.duration);
-          routeIndexRef.current = 0;
-          setRecoveryRoute([]);
-          recoveryRouteRef.current = [];
-          setSecurityState("ROUTE READY");
-          setRiskScore(5);
-          setGpsTrust(100);
-          setGpsDivergence(0);
-          addAlert(`Indoor Flight Corridor established: ${pathResult.distance.toFixed(1)} m. Ready to launch!`, "success");
-        }
-
-        // 3. Call DeepSeek Vision AI with user's API key
-        addAlert("⚙️ Querying DeepSeek Vision AI (sk-...5c7) for tactical security & corridor profiling...", "info");
-        const aiRes = await analyzeFloorPlanWithAI({
-          base64Image: imageSrc.startsWith("data:") ? imageSrc : null,
-          imageWidth: navmesh.width,
-          imageHeight: navmesh.height,
-          floorPlanScale,
-          apiKey: deepSeekKey
-        });
-
-        setAiMessage(aiRes.message);
-        if (aiRes.success) {
-          addAlert("✅ DeepSeek AI Vision: Factory floor plan security profile verified!", "success");
-        } else if (aiRes.isQuotaExceeded) {
-          addAlert("⚠️ DeepSeek API (sk-...5c7): Insufficient Account Balance (402). Switched to High-Precision Local NavMesh Engine.", "warning");
-        } else {
-          addAlert(`DeepSeek AI: ${aiRes.error || "Offline"}. Local NavMesh Engine active.`, "info");
-        }
-      } catch (err) {
-        console.error("Floor plan processing error:", err);
-        addAlert("Error processing floor plan: " + err.message, "danger");
-      } finally {
-        setIsAiProcessing(false);
-      }
-    };
-
-    img.onerror = (err) => {
-      console.error("Image load error:", err);
-      addAlert("Failed to load floor plan image file.", "danger");
-      setIsAiProcessing(false);
-    };
-
-    img.src = imageSrc;
-  }, [floorPlanScale, computeIndoorCorridorRoute, addAlert, deepSeekKey]);
-
-  // Handle File Upload & AI API Call
+  // Handle File Upload for Floor Plan
   const handleFloorPlanUpload = (e) => {
     if (e.preventDefault) e.preventDefault();
     if (e.stopPropagation) e.stopPropagation();
@@ -826,39 +701,24 @@ export default function App() {
     const objectUrl = URL.createObjectURL(file);
     setFloorPlanUrl(objectUrl);
     setEnvMode("factory");
-
-    // Read as Base64 data URL so DeepSeek Vision can process it
-    const reader = new FileReader();
-    reader.onload = (loadEvt) => {
-      processLoadedFloorPlan(loadEvt.target.result, file.name);
-    };
-    reader.onerror = () => {
-      processLoadedFloorPlan(objectUrl, file.name);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  // Instant Sample Blueprint Loader
-  const handleLoadSampleFloorPlan = () => {
-    try {
-      setEnvMode("factory");
-      const sampleDataUrl = createSampleFactoryFloorPlan();
-      setFloorPlanUrl(sampleDataUrl);
-      processLoadedFloorPlan(sampleDataUrl, "Smart Factory 100m Blueprint");
-    } catch (err) {
-      console.error("Failed to generate sample blueprint:", err);
-      addAlert("Failed to generate sample blueprint.", "danger");
-    }
+    setFactoryPhase("draw_dots");
+    setSelectedDotForEdge(null);
+    setCustomNodes([]);
+    setCustomEdges([]);
+    setManualWaypoints([]);
+    setRoute([]);
+    setSource(null);
+    setDestination(null);
+    setSelectionMode("none");
+    addAlert("📥 Floor plan uploaded! Phase 1: Click anywhere on the floor plan to place your yellow dots.", "info");
   };
 
   // Environment Mode Switcher Handler
   const handleEnvModeChange = (newMode) => {
     setEnvMode(newMode);
     if (newMode === "factory") {
-      addAlert("Switched to Factory Indoor Mode.", "info");
-      if (!floorPlanUrl) {
-        handleLoadSampleFloorPlan();
-      }
+      setFactoryPhase("draw_dots");
+      addAlert("Switched to Factory Indoor Mode. Click map to place yellow dots or upload your floor plan.", "info");
     } else {
       addAlert("Switched to Outdoor Drone GPS Mode.", "info");
       const p = MISSION_PRESETS[0];
@@ -1521,7 +1381,6 @@ export default function App() {
         customNodes={customNodes}
         customEdges={customEdges}
         onFloorPlanUpload={handleFloorPlanUpload}
-        onLoadSampleBlueprint={handleLoadSampleFloorPlan}
         fileInputRef={fileInputRef}
         manualWaypoints={manualWaypoints}
         selectedDotForEdge={selectedDotForEdge}
@@ -1576,7 +1435,7 @@ export default function App() {
                   fontWeight: 500
                 }}
               >
-                <span>{floorPlanUrl ? "✅ Blueprint Loaded" : "📥 Upload Plan"}</span>
+                <span>{floorPlanUrl ? "✅ Floor Plan Loaded" : "📥 Upload Plan"}</span>
               </button>
               <input 
                 ref={fileInputRef}
@@ -1586,28 +1445,6 @@ export default function App() {
                 onClick={(e) => { e.target.value = null; }}
                 onChange={handleFloorPlanUpload}
               />
-
-              {/* Instant Sample Blueprint Generator Button */}
-              <button
-                type="button"
-                onClick={handleLoadSampleFloorPlan}
-                title="Load built-in 100m Smart Factory Blueprint with Assembly, Warehouse & Milling zones"
-                style={{
-                  background: "rgba(56,189,248,0.15)",
-                  color: "#38bdf8",
-                  border: "1px solid #38bdf8",
-                  padding: "4px 9px",
-                  borderRadius: "4px",
-                  fontSize: "11px",
-                  cursor: "pointer",
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "4px",
-                  fontWeight: 600
-                }}
-              >
-                ⚡ Sample Blueprint
-              </button>
 
               {/* Floor Plan Real-World Scale */}
               <div style={{ display: "flex", alignItems: "center", gap: "3px" }}>
@@ -1622,33 +1459,78 @@ export default function App() {
                 <span style={{ fontSize: "10px", color: "#64748b" }}>m</span>
               </div>
 
-              {/* DeepSeek API Key Status Badge */}
-              <div
-                title="DeepSeek API Key: sk-...5c7 (Click to change)"
-                onClick={() => {
-                  const newKey = prompt("Enter DeepSeek API Key:", deepSeekKey);
-                  if (newKey !== null) {
-                    setDeepSeekApiKey(newKey);
-                    setDeepSeekKey(newKey || DEFAULT_DEEPSEEK_API_KEY);
-                    addAlert(newKey ? "DeepSeek API key updated." : "Reset to default DeepSeek key.", "info");
-                  }
-                }}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: "4px",
-                  fontSize: "10px",
-                  color: "#c084fc",
-                  background: "rgba(168, 85, 247, 0.12)",
-                  border: "1px solid rgba(168, 85, 247, 0.35)",
-                  padding: "3px 7px",
-                  borderRadius: "4px",
-                  cursor: "pointer"
-                }}
-              >
-                <span>🤖 DeepSeek</span>
-                <span style={{ color: "#a855f7", fontSize: "9px" }}>({deepSeekKey ? `sk-...${deepSeekKey.slice(-4)}` : "sk-...5c7"})</span>
-              </div>
+              {/* Phase 1: Confirm Dots & Draw Lines */}
+              {factoryPhase === "draw_dots" && (
+                <button
+                  type="button"
+                  style={{ background: "#facc15", color: "#000", border: "1px solid #facc15", padding: "4px 10px", borderRadius: "4px", fontWeight: "bold", fontSize: "11px", cursor: "pointer" }}
+                  onClick={() => {
+                    if (customNodes.length < 2) {
+                      addAlert("Please place at least 2 yellow dots on the map.", "warning");
+                      return;
+                    }
+                    setFactoryPhase("connect_dots");
+                    setSelectedDotForEdge(null);
+                    addAlert("Phase 2: Click on any yellow dot (turns red), then click another dot to draw a connecting line.", "info");
+                  }}
+                >
+                  Confirm Dots & Draw Lines ({customNodes.length})
+                </button>
+              )}
+
+              {/* Phase 2: Finish Network */}
+              {factoryPhase === "connect_dots" && (
+                <button
+                  type="button"
+                  style={{ background: "#00ff9d", color: "#000", border: "1px solid #00ff9d", padding: "4px 10px", borderRadius: "4px", fontWeight: "bold", fontSize: "11px", cursor: "pointer" }}
+                  onClick={() => {
+                    if (customEdges.length === 0) {
+                      addAlert("Connect at least two dots before finishing the network.", "warning");
+                      return;
+                    }
+                    setFactoryPhase("ready");
+                    setSelectionMode("start");
+                    setSelectedDotForEdge(null);
+                    addAlert("NavMesh network confirmed! Now select your STARTING point (S).", "success");
+                  }}
+                >
+                  Finish Network ({customEdges.length} lines)
+                </button>
+              )}
+
+              {/* Return to Edit Mode */}
+              {factoryPhase === "ready" && (
+                <button
+                  type="button"
+                  style={{ background: "rgba(250, 204, 21, 0.15)", color: "#facc15", border: "1px solid #facc15", padding: "4px 8px", borderRadius: "4px", fontWeight: "bold", fontSize: "11px", cursor: "pointer" }}
+                  onClick={() => {
+                    setFactoryPhase("draw_dots");
+                    addAlert("Edit Mode: Click map to place more yellow dots.", "info");
+                  }}
+                >
+                  ✏️ Edit Dots
+                </button>
+              )}
+
+              {/* Clear Dots button */}
+              {customNodes.length > 0 && (
+                <button
+                  type="button"
+                  style={{ background: "rgba(239, 68, 68, 0.15)", color: "#ef4444", border: "1px solid #ef4444", padding: "4px 8px", borderRadius: "4px", fontWeight: "bold", fontSize: "11px", cursor: "pointer" }}
+                  onClick={() => {
+                    setCustomNodes([]);
+                    setCustomEdges([]);
+                    setSelectedDotForEdge(null);
+                    setFactoryPhase("draw_dots");
+                    setRoute([]);
+                    setSource(null);
+                    setDestination(null);
+                    addAlert("Yellow dots and connections cleared. Click map to place new dots.", "info");
+                  }}
+                >
+                  🗑️ Clear Dots
+                </button>
+              )}
             </>
           )}
         </div>
@@ -1708,62 +1590,6 @@ export default function App() {
           </button>
         </div>
       </header>
-
-      {/* Floating DeepSeek Vision AI Security Banner */}
-      {envMode === "factory" && (isAiProcessing || aiMessage) && (
-        <div
-          style={{
-            position: "absolute",
-            top: "68px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 1100,
-            maxWidth: "680px",
-            width: "90%",
-            background: "rgba(15, 23, 42, 0.95)",
-            border: "1px solid #00ff9d",
-            boxShadow: "0 8px 32px rgba(0, 255, 157, 0.2)",
-            borderRadius: "8px",
-            padding: "10px 14px",
-            backdropFilter: "blur(12px)",
-            color: "#e2e8f0",
-            fontSize: "12px",
-            display: "flex",
-            alignItems: "flex-start",
-            gap: "10px"
-          }}
-        >
-          <div style={{ fontSize: "20px", marginTop: "2px" }}>
-            {isAiProcessing ? "⚙️" : "🤖"}
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-              <strong style={{ color: "#00ff9d", fontSize: "12px", letterSpacing: "0.5px" }}>
-                DeepSeek Vision AI Security Profile
-              </strong>
-              {!isAiProcessing && (
-                <button
-                  type="button"
-                  onClick={() => setAiMessage("")}
-                  style={{ background: "transparent", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "14px", padding: 0 }}
-                  title="Dismiss"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-            {isAiProcessing ? (
-              <div style={{ color: "#facc15", fontStyle: "italic" }}>
-                Analyzing indoor flight corridors, obstacle clusters & spoofing reflection zones...
-              </div>
-            ) : (
-              <div style={{ color: "#cbd5e1", lineHeight: "1.4" }}>
-                {aiMessage}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* ── Swarm Byzantine Consensus Threat Banner ─────────────────────── */}
       {swarmMode && swarmConsensusAlert && (

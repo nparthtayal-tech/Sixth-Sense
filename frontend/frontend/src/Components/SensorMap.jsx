@@ -517,7 +517,6 @@ export default function SensorMap({
   onDestDrag,
   onSpoofDrag,
   onFloorPlanUpload,
-  onLoadSampleBlueprint,
   fileInputRef,
   swarmMode = false,
   swarmRobots = [],
