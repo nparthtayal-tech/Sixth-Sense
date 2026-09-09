@@ -1,0 +1,18 @@
+[Unit]
+Description=SensorSentry mobile cobot safety supervisor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cobot
+WorkingDirectory=/opt/sensorsentry/hardware_deploy_cobot
+EnvironmentFile=/etc/sensorsentry/cobot.env
+ExecStart=/usr/bin/python3 /opt/sensorsentry/hardware_deploy_cobot/main.py --mode udp --controller advisory
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

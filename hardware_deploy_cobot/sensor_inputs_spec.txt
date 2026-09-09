@@ -1,0 +1,72 @@
+SensorSentry Cobot telemetry schema v1
+=======================================
+
+Transport: one UTF-8 JSON object per UDP datagram or line of stdin.
+Authentication: HMAC-SHA256 over canonical JSON (sorted keys, no whitespace)
+with the `signature` field omitted. `signature` is lowercase hexadecimal.
+
+Common fields
+-------------
+schema_version: integer 1
+robot_id: configured robot identifier
+sequence: non-negative integer (validated against RFC 4303 sliding replay window, default size 128)
+timestamp: Unix seconds; must be within configured max age
+sensor: ODOMETRY | LOCALIZATION | IMU | LIDAR | BATTERY | ESTOP
+session_id: optional string (e.g. boot UUID; resets sequence window cleanly on producer restart)
+signature: HMAC-SHA256 hex digest
+
+ODOMETRY
+--------
+frame: "map" or "odom"
+position_m: [x, y] in metres in the configured coordinate frame
+yaw_rad: finite heading in radians
+linear_velocity_m_s: finite non-negative scalar
+angular_velocity_rad_s: finite scalar
+
+LOCALIZATION
+------------
+frame: "map" (e.g. from AMCL / amcl_pose)
+position_m: [x, y] in metres in the map frame
+yaw_rad: finite heading in radians
+linear_velocity_m_s: finite non-negative scalar
+angular_velocity_rad_s: finite scalar
+
+IMU
+---
+frame: "base_link"
+yaw_rate_rad_s: finite scalar
+forward_accel_m_s2: finite scalar
+
+LIDAR
+-----
+frame: "base_link" (optional)
+min_range_m: finite non-negative distance to nearest valid obstacle return
+
+BATTERY
+-------
+charge_percent: 0..100
+voltage_v: finite positive scalar
+
+ESTOP
+-----
+pressed: JSON boolean. A true value latches safe stop in LOCKDOWN mode.
+
+Supervisor Clearance command
+----------------------------
+action: "CLEAR_SAFE_STOP"
+robot_id: configured robot identifier
+sequence: integer
+timestamp: Unix seconds
+token: cryptographic clearance token (HMAC-SHA256 of robot_id:state with supervisor key)
+allow_lockdown_clear: optional boolean (required true to clear LOCKDOWN state)
+signature: HMAC-SHA256 hex digest
+
+Navigation command
+------------------
+packet_type: "navigation_command"
+robot_id, map_id, sequence, timestamp, target_position_m, target_yaw_rad,
+max_linear_speed_m_s, signature
+
+The navigation command has the same HMAC and replay requirements. It is never
+sent to Nav2 by this package; the validator is a policy gate for an upstream
+mission planner/adapter.

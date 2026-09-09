@@ -1,0 +1,10 @@
+# Direct dependencies of the copied hardware_deploy algorithms.
+numpy>=1.20.0
+scipy>=1.7.0
+
+# Optional transports used by the cobot deployment boundary.
+pyserial>=3.5
+python-can>=4.3
+
+# ROS 2 Python packages (rclpy, geometry_msgs, nav2_msgs and action_msgs) are
+# installed from the ROS distribution, not from PyPI. See README.md.

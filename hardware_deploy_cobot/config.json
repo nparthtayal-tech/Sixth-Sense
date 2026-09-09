@@ -1,0 +1,36 @@
+{
+  "cobot": {
+    "robot_id": "COBOT-ALPHA-01",
+    "map_id": "factory-floor-v1",
+    "base_frame": "base_link",
+    "map_frame": "map"
+  },
+  "connection": {
+    "telemetry_udp_port": 5010,
+    "telemetry_max_age_s": 2.0,
+    "sensor_timeout_s": 1.5,
+    "ros_namespace": ""
+  },
+  "navigation_envelope": {
+    "map_bounds_m": [0.0, 0.0, 50.0, 35.0],
+    "corridor_half_width_m": 0.75,
+    "max_linear_speed_m_s": 1.0,
+    "max_angular_speed_rad_s": 1.5,
+    "minimum_obstacle_distance_m": 0.45,
+    "max_localization_jump_m": 1.2
+  },
+  "security_monitors": {
+    "hmac_required": true,
+    "replay_protection": true,
+    "replay_window_size": 128,
+    "require_clearance_to_resume": true,
+    "state_persistence_file": "state.json",
+    "supervisor_clearance_key_env": "SENSORSENTRY_SUPERVISOR_KEY"
+  },
+  "failsafe_actuation": {
+    "action_on_localization_attack": "CANCEL_NAVIGATION_AND_STOP",
+    "action_on_geofence_breach": "CANCEL_NAVIGATION_AND_STOP",
+    "action_on_obstacle": "STOP",
+    "zero_velocity_publish_count": 3
+  }
+}
